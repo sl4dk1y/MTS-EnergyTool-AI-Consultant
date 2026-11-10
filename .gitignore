@@ -1,0 +1,71 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node.js
+node_modules/
+dist/
+build/
+.npm/
+
+# Секреты и локальная конфигурация
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Локальные базы, журналы и временные файлы
+*.sqlite
+*.sqlite3
+*.db
+*.log
+*.tmp
+*.temp
+*.bak
+
+# Закрытые материалы организаторов и локальные данные
+/Данные/
+/данные/
+/private-data/
+/local-data/
+/user-data/
+/organizer-materials/
+
+# Индексы и артефакты поиска
+/indexes/
+/indices/
+/vector-store/
+/chroma/
+/faiss.index
+
+# Docker, временные архивы распаковки и системные файлы
+.docker/
+__MACOSX/
+._*
+
+# macOS и IDE
+.DS_Store
+.AppleDouble
+.LSOverride
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Исходные материалы этого кейса (не добавлять в публичный Git)
+/МТС_кейс.pdf
+/МТС_кейс.pdf
+/Данные-20261110T154038Z-1-001.zip
+/Данные*.zip
+/Данные/
