@@ -1,0 +1,34 @@
+# Общая ответственность за репозиторий
+* @sl4dk1y
+
+# Документация
+/docs/ @sl4dk1y
+/README.md @sl4dk1y
+/CONTRIBUTING.md @sl4dk1y
+/CONTRIBUTORS.md @sl4dk1y
+/SECURITY.md @sl4dk1y
+
+# Конкурсный runtime
+/solution.py @sl4dk1y @kodi842
+
+# LLM и Consultant Engine
+/src/energytool/agent/ @sl4dk1y @kodi842
+/src/energytool/dialogue/ @sl4dk1y @kodi842
+/src/energytool/leads/ @sl4dk1y @kodi842
+
+# RAG
+/src/energytool/rag/ @CAH0
+
+# Backend
+/backend/ @sl4dk1y @kodi842
+
+# Frontend
+/frontend/ @pesocheck
+
+# Тестирование
+/tests/ @sl4dk1y @kodi842
+
+# Конфигурация сборки
+/Dockerfile @sl4dk1y
+/compose.yaml @sl4dk1y
+/.github/workflows/ @sl4dk1y
