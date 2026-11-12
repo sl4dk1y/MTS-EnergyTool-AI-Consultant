@@ -82,4 +82,4 @@ python3 tools/eval_retrieval.py --questions local-data/demo_questions.csv --labe
 - Семантический поиск и reranking (#10, #11, #51).
 - Абсолютный порог релевантности (#12).
 - Проверка на настоящей модели и подбор промпта по оценкам судьи.
-- Backend API, подтверждение и хранение заявки.
+- Docker и подключение фронтенда к API, описание API в [API.md](API.md).

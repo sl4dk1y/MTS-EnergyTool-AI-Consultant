@@ -151,6 +151,11 @@ class ConsultantEngine:
         self._top_k = top_k
         self._relative_cutoff = relative_cutoff
 
+    @property
+    def llm(self) -> ChatModel:
+        """Та же модель нужна backend для резюме заявки."""
+        return self._llm
+
     def retrieve(self, request: ConsultantRequest) -> list[RetrievedChunk]:
         if self._retriever is None:
             return []
