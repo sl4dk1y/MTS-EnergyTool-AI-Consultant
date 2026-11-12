@@ -18,6 +18,8 @@ MAX_ANSWER_CHARS = 10_000
 DEFAULT_TOP_K = 8
 MAX_CONTEXT_CHARS = 14_000
 MAX_HISTORY_TURNS = 12
+LLM_TIMEOUT_SECONDS = 40
+LLM_MAX_ATTEMPTS = 2
 
 FALLBACK_ANSWER = (
     "Сейчас не получилось подготовить ответ. Опишите, пожалуйста, задачу чуть подробнее "
@@ -157,7 +159,13 @@ def build_default_engine() -> ConsultantEngine:
     kb_path = find_knowledge_base(data_dir, (Path(__file__).resolve().parent / data_dir, Path.cwd()))
     # Здесь подключается основной RAG, когда он появится в репозитории.
     retriever = KnowledgeBaseSearch.from_path(kb_path) if kb_path else None
-    return ConsultantEngine(LLMClient.from_env(), retriever, top_k=_int_env("TOP_K", DEFAULT_TOP_K))
+    # По умолчанию клиент ждёт 90 с и делает 3 попытки, это до 4,5 минут на
+    # один зависший вопрос. Для конкурса хватит 40 с и двух попыток.
+    llm = LLMClient.from_env(
+        timeout=float(_int_env("LLM_TIMEOUT_SECONDS", LLM_TIMEOUT_SECONDS)),
+        max_attempts=LLM_MAX_ATTEMPTS,
+    )
+    return ConsultantEngine(llm, retriever, top_k=_int_env("TOP_K", DEFAULT_TOP_K))
 
 
 _engine: Optional[ConsultantEngine] = None

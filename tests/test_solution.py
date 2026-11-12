@@ -3,11 +3,14 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from consultant_contracts import ConsultantResponse
 from llm_client import LLMAPIError, LLMClient, LLMConfigurationError
 from solution import (
+    TIMEOUT_ANSWER,
     ConsultantIntegrationError,
     InputFormatError,
     parse_question,
@@ -97,6 +100,66 @@ class AdapterTests(unittest.TestCase):
         self.write_input([("1", "q")])
         with self.assertRaisesRegex(ConsultantIntegrationError, "RuntimeError") as error:
             run_adapter(self.input_path, self.output_path, lambda _: (_ for _ in ()).throw(RuntimeError("secret=do-not-log")))
+        self.assertNotIn("do-not-log", str(error.exception))
+        self.assertFalse(self.output_path.exists())
+
+    def test_parallel_run_keeps_input_order(self):
+        self.write_input([(str(i), f"вопрос {i}") for i in range(12)])
+        active = []
+        peak = [0]
+        lock = threading.Lock()
+
+        def consult(request):
+            number = int(request.question.split()[-1])
+            with lock:
+                active.append(number)
+                peak[0] = max(peak[0], len(active))
+            # Ранние вопросы отвечают дольше, чтобы ответы пришли не по порядку.
+            time.sleep(0.02 * (12 - number) / 12)
+            with lock:
+                active.remove(number)
+            return ConsultantResponse(answer=f"ответ {number}")
+
+        count = run_adapter(self.input_path, self.output_path, consult, max_workers=4)
+        self.assertEqual(count, 12)
+        with self.output_path.open(encoding="utf-8", newline="") as stream:
+            output = list(csv.DictReader(stream))
+        self.assertEqual([row["id"] for row in output], [str(i) for i in range(12)])
+        self.assertEqual([row["answer"] for row in output], [f"ответ {i}" for i in range(12)])
+        self.assertGreater(peak[0], 1)
+
+    def test_deadline_fills_unfinished_answers_and_does_not_hang(self):
+        self.write_input([("fast", "быстрый"), ("slow", "медленный")])
+        release = threading.Event()
+
+        def consult(request):
+            if request.question == "медленный":
+                release.wait(5)
+            return ConsultantResponse(answer="готово")
+
+        started = time.monotonic()
+        try:
+            run_adapter(
+                self.input_path, self.output_path, consult, max_workers=2, deadline=time.monotonic() + 0.3
+            )
+        finally:
+            release.set()
+        self.assertLess(time.monotonic() - started, 2)
+        with self.output_path.open(encoding="utf-8", newline="") as stream:
+            output = {row["id"]: row["answer"] for row in csv.DictReader(stream)}
+        self.assertEqual(output["fast"], "готово")
+        self.assertEqual(output["slow"], TIMEOUT_ANSWER)
+
+    def test_parallel_engine_exception_is_sanitized(self):
+        self.write_input([("1", "ok"), ("2", "bad")])
+
+        def consult(request):
+            if request.question == "bad":
+                raise RuntimeError("secret=do-not-log")
+            return ConsultantResponse(answer="ответ")
+
+        with self.assertRaisesRegex(ConsultantIntegrationError, "строки 3") as error:
+            run_adapter(self.input_path, self.output_path, consult, max_workers=2)
         self.assertNotIn("do-not-log", str(error.exception))
         self.assertFalse(self.output_path.exists())
 
