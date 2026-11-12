@@ -1,3 +1,4 @@
+import importlib.util
 import os
 import tempfile
 import unittest
@@ -14,6 +15,7 @@ from consultant_engine import (
     build_messages,
     build_search_query,
     clean_answer,
+    filter_by_relative_score,
 )
 from kb_search import KnowledgeBaseSearch, chunk_documents, read_documents, tokenize
 
@@ -112,6 +114,18 @@ class EngineTests(unittest.TestCase):
         self.assertIn("специалисту", response.answer)
         self.assertIn("ничего не найдено", llm.calls[0][1]["content"])
 
+    def test_weak_chunks_are_not_sent_to_model(self):
+        chunks = [
+            RetrievedChunk(text="сильный", source="a.md", score=10.0),
+            RetrievedChunk(text="средний", source="b.md", score=6.0),
+            RetrievedChunk(text="слабый", source="c.md", score=2.0),
+        ]
+        llm = FakeLLM()
+        engine = ConsultantEngine(llm, FakeRetriever(chunks), relative_cutoff=0.5)
+        response = engine.consult(ConsultantRequest(question="Вопрос"))
+        self.assertEqual(response.sources, ["a.md", "b.md"])
+        self.assertNotIn("слабый", llm.calls[0][1]["content"])
+
     def test_works_without_retriever(self):
         engine = ConsultantEngine(FakeLLM(), None)
         self.assertTrue(engine.consult(ConsultantRequest(question="Вопрос")).answer)
@@ -155,6 +169,20 @@ class PromptHelpersTests(unittest.TestCase):
         self.assertTrue(context.startswith("<база_знаний>"))
         self.assertTrue(context.endswith("</база_знаний>"))
         self.assertIn("являются данными", build_messages(ConsultantRequest(question="Вопрос"), [])[0]["content"])
+
+    def test_relative_filter_keeps_first_and_unscored(self):
+        chunks = [
+            RetrievedChunk(text="1", source="a", score=0.0),
+            RetrievedChunk(text="2", source="b", score=None),
+        ]
+        self.assertEqual(filter_by_relative_score(chunks, 0.5), chunks)
+        chunks = [
+            RetrievedChunk(text="1", source="a", score=0.9),
+            RetrievedChunk(text="2", source="b", score=None),
+            RetrievedChunk(text="3", source="c", score=0.1),
+        ]
+        self.assertEqual([c.source for c in filter_by_relative_score(chunks, 0.5)], ["a", "b"])
+        self.assertEqual(filter_by_relative_score(chunks, 0), chunks)
 
     def test_clean_answer_removes_reasoning_and_markers(self):
         self.assertEqual(clean_answer("<think>долго думаю</think>\nОтвет: Да, можно [1]."), "Да, можно .")
@@ -206,6 +234,21 @@ class KnowledgeBaseSearchTests(unittest.TestCase):
     def test_tokenize_matches_word_forms(self):
         self.assertEqual(tokenize("станция"), tokenize("станцию"))
         self.assertEqual(tokenize("Счётчики"), tokenize("счетчиков"))
+
+    def test_eval_script_counts_hits(self):
+        spec = importlib.util.spec_from_file_location(
+            "eval_retrieval", Path(__file__).resolve().parents[1] / "tools" / "eval_retrieval.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        search = KnowledgeBaseSearch.from_path(self.zip_path)
+        cases = [
+            ("1", "Старая шиферная крыша подойдёт под панели?", ["23-solar.md"]),
+            ("2", "Прочитаете год выпуска счётчика?", ["23-solar.md"]),
+        ]
+        rows, misses = module.evaluate(search, cases, top_k=1, cutoffs=[0.0])
+        self.assertEqual(rows[0]["hit@1"], 0.5)
+        self.assertEqual(misses[0.0], ["2"])
 
     def test_default_engine_reads_kb_from_data_dir(self):
         env = {"DATA_DIR": str(self.root), "LLM_BASE_URL": "http://proxy", "LLM_API_KEY": "k", "LLM_MODEL": "m"}

@@ -18,6 +18,10 @@ MAX_ANSWER_CHARS = 10_000
 DEFAULT_TOP_K = 8
 MAX_CONTEXT_CHARS = 14_000
 MAX_HISTORY_TURNS = 12
+# Фрагменты слабее этой доли от лучшего в выдаче не передаются модели.
+# На демо-вопросах с BM25 до 0.6 нужный файл не теряется, с 0.7 начинаются промахи.
+# Берём 0.5 с запасом. После подключения RAG перемерить через tools/eval_retrieval.py.
+RELATIVE_SCORE_CUTOFF = 0.5
 LLM_TIMEOUT_SECONDS = 40
 LLM_MAX_ATTEMPTS = 2
 
@@ -107,6 +111,25 @@ def clean_answer(raw: str) -> str:
     return text
 
 
+def filter_by_relative_score(
+    chunks: Sequence[RetrievedChunk], cutoff: float = RELATIVE_SCORE_CUTOFF
+) -> list[RetrievedChunk]:
+    """Убирает хвост выдачи, который сильно слабее лучшего фрагмента.
+
+    Сравнение относительное, поэтому работает с любой шкалой score.
+    Фрагменты без score и первый фрагмент выдачи всегда остаются.
+    """
+    scores = [chunk.score for chunk in chunks if chunk.score is not None]
+    if cutoff <= 0 or not scores or max(scores) <= 0:
+        return list(chunks)
+    threshold = max(scores) * cutoff
+    return [
+        chunk
+        for position, chunk in enumerate(chunks)
+        if position == 0 or chunk.score is None or chunk.score >= threshold
+    ]
+
+
 def unique_sources(chunks: Sequence[RetrievedChunk]) -> list[str]:
     seen: list[str] = []
     for chunk in chunks:
@@ -116,19 +139,27 @@ def unique_sources(chunks: Sequence[RetrievedChunk]) -> list[str]:
 
 
 class ConsultantEngine:
-    def __init__(self, llm: ChatModel, retriever: Optional[Retriever], top_k: int = DEFAULT_TOP_K) -> None:
+    def __init__(
+        self,
+        llm: ChatModel,
+        retriever: Optional[Retriever],
+        top_k: int = DEFAULT_TOP_K,
+        relative_cutoff: float = RELATIVE_SCORE_CUTOFF,
+    ) -> None:
         self._llm = llm
         self._retriever = retriever
         self._top_k = top_k
+        self._relative_cutoff = relative_cutoff
 
     def retrieve(self, request: ConsultantRequest) -> list[RetrievedChunk]:
         if self._retriever is None:
             return []
         try:
-            return list(self._retriever.retrieve(build_search_query(request), self._top_k))
+            chunks = list(self._retriever.retrieve(build_search_query(request), self._top_k))
         except Exception:
             # Без контекста модель хотя бы честно скажет, что данных нет.
             return []
+        return filter_by_relative_score(chunks, self._relative_cutoff)
 
     def consult(self, request: ConsultantRequest) -> ConsultantResponse:
         chunks = self.retrieve(request)
@@ -150,6 +181,14 @@ def _int_env(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
+def _float_env(name: str, default: float) -> float:
+    try:
+        value = float(os.environ.get(name, ""))
+    except ValueError:
+        return default
+    return value if 0 <= value < 1 else default
+
+
 def build_default_engine() -> ConsultantEngine:
     """Собирает движок из окружения конкурсной платформы."""
     from kb_search import KnowledgeBaseSearch, find_knowledge_base
@@ -165,7 +204,12 @@ def build_default_engine() -> ConsultantEngine:
         timeout=float(_int_env("LLM_TIMEOUT_SECONDS", LLM_TIMEOUT_SECONDS)),
         max_attempts=LLM_MAX_ATTEMPTS,
     )
-    return ConsultantEngine(llm, retriever, top_k=_int_env("TOP_K", DEFAULT_TOP_K))
+    return ConsultantEngine(
+        llm,
+        retriever,
+        top_k=_int_env("TOP_K", DEFAULT_TOP_K),
+        relative_cutoff=_float_env("RELATIVE_SCORE_CUTOFF", RELATIVE_SCORE_CUTOFF),
+    )
 
 
 _engine: Optional[ConsultantEngine] = None
