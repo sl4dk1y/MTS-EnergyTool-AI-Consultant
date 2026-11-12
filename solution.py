@@ -1,0 +1,186 @@
+"""Конкурсный адаптер: вопросы из CSV → Consultant Engine → submission.csv."""
+
+from __future__ import annotations
+
+import csv
+import importlib
+import os
+import tempfile
+from pathlib import Path
+from typing import Callable, Iterable, Optional
+
+from consultant_contracts import ConsultantRequest, ConsultantResponse
+
+MAX_ANSWER_CHARS = 10_000
+ROLE_LABELS = {"пользователь": "user", "ассистент": "assistant"}
+
+
+class InputFormatError(ValueError):
+    """Входной CSV не соответствует контракту конкурса."""
+
+
+class ConsultantIntegrationError(RuntimeError):
+    """Consultant Engine не подключён либо нарушил внутренний контракт."""
+
+
+def parse_question(raw_question: str) -> ConsultantRequest:
+    """Выделяет историю из официального многострочного формата.
+
+    Demo-вопросы используют строки «Пользователь: ...» и «Ассистент: ...».
+    Если весь текст не соответствует этому формату, он передаётся как вопрос
+    без преобразований, чтобы не потерять содержимое.
+    """
+    lines = raw_question.splitlines()
+    turns: list[dict[str, str]] = []
+    current_role: Optional[str] = None
+    current_parts: list[str] = []
+    recognized = False
+
+    def flush() -> None:
+        nonlocal current_role, current_parts
+        if current_role is not None:
+            turns.append({"role": current_role, "content": "\n".join(current_parts).strip()})
+        current_role = None
+        current_parts = []
+
+    for line in lines:
+        prefix, separator, rest = line.partition(":")
+        role = ROLE_LABELS.get(prefix.strip().casefold()) if separator else None
+        if role is not None:
+            recognized = True
+            flush()
+            current_role = role
+            current_parts = [rest.lstrip()]
+        elif current_role is not None:
+            current_parts.append(line)
+        elif line.strip():
+            return ConsultantRequest(question=raw_question)
+    flush()
+
+    if not recognized or not turns or turns[-1]["role"] != "user":
+        return ConsultantRequest(question=raw_question)
+    final_question = turns[-1]["content"]
+    history = turns[:-1]
+    if not final_question:
+        return ConsultantRequest(question=raw_question)
+    return ConsultantRequest(question=final_question, history=history)
+
+
+def read_questions(path: Path) -> list[tuple[str, str]]:
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream, strict=True)
+        if reader.fieldnames is None:
+            raise InputFormatError("Входной CSV пуст или не содержит заголовка")
+        if "id" not in reader.fieldnames or "question" not in reader.fieldnames:
+            raise InputFormatError("В questions.csv обязательны колонки id и question")
+        if len(set(reader.fieldnames)) != len(reader.fieldnames):
+            raise InputFormatError("В questions.csv повторяются имена колонок")
+        questions: list[tuple[str, str]] = []
+        seen_ids: set[str] = set()
+        for row_number, row in enumerate(reader, start=2):
+            if None in row or any(value is None for value in row.values()):
+                raise InputFormatError(f"Некорректное число CSV-полей в строке {row_number}")
+            item_id = row["id"]
+            question = row["question"]
+            if not item_id.strip():
+                raise InputFormatError(f"Пустой ID в строке {row_number}")
+            if item_id in seen_ids:
+                raise InputFormatError(f"Повтор ID во входном CSV в строке {row_number}")
+            if not question.strip():
+                raise InputFormatError(f"Пустой вопрос в строке {row_number}")
+            seen_ids.add(item_id)
+            questions.append((item_id, question))
+    return questions
+
+
+def write_submission(path: Path, rows: Iterable[tuple[str, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_name: Optional[str] = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", newline="", dir=path.parent, delete=False
+        ) as stream:
+            temp_name = stream.name
+            writer = csv.writer(stream, lineterminator="\n")
+            writer.writerow(("id", "answer"))
+            for item_id, answer in rows:
+                if not answer.strip():
+                    raise ConsultantIntegrationError(f"Пустой ответ для ID {item_id}")
+                if len(answer) > MAX_ANSWER_CHARS:
+                    raise ConsultantIntegrationError(f"Ответ для ID {item_id} превышает лимит символов")
+                writer.writerow((item_id, answer))
+        os.replace(temp_name, path)
+    finally:
+        if temp_name and os.path.exists(temp_name):
+            os.unlink(temp_name)
+
+
+def run_adapter(
+    questions_path: Path,
+    output_path: Path,
+    consult: Callable[[ConsultantRequest], ConsultantResponse],
+) -> int:
+    questions = read_questions(questions_path)
+    results: list[tuple[str, str]] = []
+    for row_number, (item_id, raw_question) in enumerate(questions, start=2):
+        request = parse_question(raw_question)
+        try:
+            response = consult(request)
+        except Exception as exc:
+            # Не печатаем текст исключения: сторонние клиенты могут включить
+            # в него URL, заголовки или фрагмент запроса.
+            raise ConsultantIntegrationError(
+                f"Consultant Engine завершился ошибкой для строки {row_number} "
+                f"({type(exc).__name__})"
+            ) from None
+        if not isinstance(response, ConsultantResponse):
+            raise ConsultantIntegrationError("Engine должен вернуть ConsultantResponse")
+        answer = response.answer.strip() if isinstance(response.answer, str) else ""
+        if not answer:
+            raise ConsultantIntegrationError(f"Engine вернул пустой ответ для строки {row_number}")
+        if len(answer) > MAX_ANSWER_CHARS:
+            raise ConsultantIntegrationError(
+                f"Ответ для строки {row_number} превышает лимит {MAX_ANSWER_CHARS} символов"
+            )
+        results.append((item_id, answer))
+    write_submission(output_path, results)
+    return len(results)
+
+
+def _find_input(data_dir: Path, filename: str) -> Path:
+    candidates = (
+        data_dir / filename,
+        Path(__file__).resolve().parent / data_dir / filename,
+        Path.cwd() / filename,
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(f"Не найден обязательный входной файл {filename}")
+
+
+def _load_engine() -> Callable[[ConsultantRequest], ConsultantResponse]:
+    try:
+        module = importlib.import_module("consultant_engine")
+        consult = getattr(module, "consult")
+    except (ImportError, AttributeError) as exc:
+        raise ConsultantIntegrationError(
+            "Consultant Engine не подключён: ожидается consultant_engine.consult(request)"
+        ) from None
+    if not callable(consult):
+        raise ConsultantIntegrationError("consultant_engine.consult должен быть вызываемым")
+    return consult
+
+
+def main() -> None:
+    data_dir = Path(os.environ.get("DATA_DIR", "data"))
+    questions_path = _find_input(data_dir, "questions.csv")
+    # Проверяем, что платформа передала базу, но не читаем её здесь: загрузка и
+    # поиск принадлежат подключённому RAG/Consultant Engine.
+    _find_input(data_dir, "knowledge-base.zip")
+    count = run_adapter(questions_path, Path("submission.csv"), _load_engine())
+    print(f"Создан submission.csv: {count} ответов")
+
+
+if __name__ == "__main__":
+    main()
