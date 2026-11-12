@@ -1,0 +1,44 @@
+name: Проверки Python
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Тесты Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.11"]
+
+    steps:
+      - name: Получить исходный код
+        uses: actions/checkout@v7
+
+      - name: Настроить Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Проверить обязательные файлы
+        run: |
+          test -f solution.py
+          test -f llm_client.py
+          test -f consultant_contracts.py
+          test -f requirements.txt
+
+      - name: Проверить синтаксис модулей
+        run: PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pycache" python -m py_compile solution.py llm_client.py consultant_contracts.py
+
+      - name: Запустить unit-тесты
+        run: python -m unittest discover -s tests -v
