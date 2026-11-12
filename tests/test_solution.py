@@ -103,8 +103,15 @@ class AdapterTests(unittest.TestCase):
     def test_missing_engine_is_explicit(self):
         env = dict(os.environ)
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+        code = (
+            "import importlib, solution\n"
+            "def fail(name):\n"
+            "    raise ImportError('secret')\n"
+            "importlib.import_module = fail\n"
+            "solution._load_engine()\n"
+        )
         result = subprocess.run(
-            [sys.executable, "-c", "from solution import _load_engine; _load_engine()"],
+            [sys.executable, "-c", code],
             cwd=self.root,
             env=env,
             capture_output=True,
@@ -114,6 +121,12 @@ class AdapterTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Consultant Engine не подключён", result.stderr)
         self.assertNotIn("secret", result.stderr.lower())
+
+    def test_engine_module_is_connected(self):
+        import consultant_engine
+        from solution import _load_engine
+
+        self.assertIs(_load_engine(), consultant_engine.consult)
 
 
 class LLMClientTests(unittest.TestCase):
