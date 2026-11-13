@@ -5,7 +5,16 @@ export async function api(path, method = 'GET', body) {
     cache: 'no-store',
     body: body ? JSON.stringify(body) : undefined,
   });
-  return res.json();
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const detail = data.detail;
+    const message = typeof detail === 'string' ? detail : (detail && detail.message) || `Ошибка ${res.status}`;
+    const err = new Error(message);
+    err.status = res.status;
+    err.detail = detail;
+    throw err;
+  }
+  return data;
 }
 
 export const EXAMPLE_QUESTIONS = [

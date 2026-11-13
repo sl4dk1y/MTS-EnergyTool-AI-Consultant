@@ -28,8 +28,8 @@ export default function Sidebar({ products, sessions, onAsk, open }) {
       <section className="panel">
         <h2>История диалогов</h2>
         <div id="history">
-          {sessions.length === 0 ? 'Пока пусто' : sessions.slice(-8).reverse().map((s) => (
-            <div className="hist" key={s.id}>{s.created} · сообщений: {s.messages}{s.lead ? ' · есть заявка' : ''}</div>
+          {sessions.length === 0 ? 'Пока пусто' : sessions.slice(0, 8).map((s) => (
+            <div className="hist" key={s.id}>{(s.created_at || '').replace('T', ' ').slice(0, 16)} · {s.title || 'Диалог'} · сообщений: {s.message_count ?? 0}{s.has_lead ? ' · есть заявка' : ''}</div>
           ))}
         </div>
         <p style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.5 }}>История сохраняется для менеджера, но не открывается кликом — чтобы случайно не вернуться в прошлый диалог. Каждая загрузка страницы начинает новый диалог.</p>

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { api, EXAMPLE_QUESTIONS } from './api.js';
+import { PRODUCTS } from './products.js';
 import Sidebar from './components/Sidebar.jsx';
 import LeadModal from './components/LeadModal.jsx';
 
@@ -10,13 +11,26 @@ export default function App() {
   const [msgs, setMsgs] = useState([{ role: 'assistant', content: GREETING }]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
-  const [products, setProducts] = useState([]);
+  const [products] = useState(PRODUCTS.filter((p) => p.id !== 'general'));
   const [sessions, setSessions] = useState([]);
   const [showDebug, setShowDebug] = useState(false);
-  const [debugText, setDebugText] = useState('Отладка: пока нет ответов. Здесь появятся время ответа, тема, продукт и источники из базы знаний.');
+  const [debugText, setDebugText] = useState('Отладка: пока нет ответов. Здесь появятся время ответа и источники из базы знаний.');
   const [leadOpen, setLeadOpen] = useState(false);
+  const [leadDraft, setLeadDraft] = useState(null);
   const [toast, setToast] = useState('');
   const [sideOpen, setSideOpen] = useState(false);
+  const [theme, setTheme] = useState(() => {
+    try {
+      const saved = localStorage.getItem('mts-theme');
+      if (saved === 'dark' || saved === 'light') return saved;
+      return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    } catch { return 'light'; }
+  });
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    try { localStorage.setItem('mts-theme', theme); } catch {}
+  }, [theme]);
   const chatRef = useRef(null);
   const inputRef = useRef(null);
   const toastTimer = useRef(null);
@@ -29,32 +43,27 @@ export default function App() {
   }, []);
 
   const loadHistory = useCallback(async () => {
-    try { setSessions(await api('/api/sessions')); } catch {}
-  }, []);
-
-  const loadProducts = useCallback(async () => {
     try {
-      const ps = await api('/api/products');
-      setProducts(ps.filter((p) => p.id !== 'general'));
-    } catch { setProducts([]); }
+      const list = await api('/api/sessions');
+      setSessions(Array.isArray(list) ? list : []);
+    } catch {}
   }, []);
 
   const startFresh = useCallback(async () => {
     try {
-      const d = await api('/api/sessions/new', 'POST', {});
-      setSid(d.session_id || '');
+      const d = await api('/api/sessions', 'POST', {});
+      setSid(d.id || '');
     } catch { setSid(''); }
     setMsgs([{ role: 'assistant', content: GREETING }]);
-    setDebugText('Отладка: создан новый диалог. Старая сессия из localStorage больше не восстанавливается.');
+    setDebugText('Отладка: создан новый диалог.');
     loadHistory();
   }, [loadHistory]);
 
   useEffect(() => {
     if (startedRef.current) return;
     startedRef.current = true;
-    loadProducts();
     startFresh();
-  }, [loadProducts, startFresh]);
+  }, [startFresh]);
 
   useEffect(() => {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
@@ -62,35 +71,61 @@ export default function App() {
 
   const send = useCallback(async (text) => {
     const t = (text ?? input).trim();
-    if (!t || busy) return;
+    if (!t || busy || !sid) return;
     setBusy(true);
     setInput('');
     if (inputRef.current) inputRef.current.style.height = 'auto';
     setMsgs((prev) => [...prev, { role: 'user', content: t }]);
     try {
-      const d = await api('/api/chat', 'POST', { session_id: sid, message: t });
-      setSid(d.session_id || sid);
-      const meta = `Ответ за ${d.latency_ms} мс · ${d.product || ''}`;
-      setMsgs(d.messages.map((m, i, arr) => i === arr.length - 1 && m.role === 'assistant' ? { ...m, meta } : m));
-      setDebugText(`Время: ${d.latency_ms} мс\nТема: ${d.intent}\nПродукт: ${d.product}\nИсточники:\n${d.sources.length ? d.sources.map((s) => `- ${s.file} — ${s.title}`).join('\n') : 'не найдены'}`);
-    } catch {
-      setMsgs((prev) => [...prev, { role: 'assistant', content: 'Не удалось получить ответ от сервера. Проверьте, что сервер запущен, и попробуйте ещё раз.' }]);
+      const d = await api(`/api/sessions/${sid}/messages`, 'POST', { text: t });
+      const ans = d.assistant_message || {};
+      const sources = Array.isArray(ans.sources) ? ans.sources : [];
+      const meta = ans.elapsed_ms != null ? `Ответ за ${ans.elapsed_ms} мс` : '';
+      setMsgs((prev) => [...prev, { role: 'assistant', content: ans.content || 'Нет ответа', meta }]);
+      setDebugText(`Время: ${ans.elapsed_ms ?? '—'} мс\nИсточники:\n${sources.length ? sources.map((s) => `- ${s}`).join('\n') : 'не найдены'}`);
+      if (d.lead_suggested) showToast('Похоже, вам стоит оставить заявку менеджеру');
+    } catch (e) {
+      const msg = e && e.status === 503 ? 'Модель пока не настроена на сервере. Попробуйте позже или передайте вопрос специалисту.' : `Не удалось получить ответ: ${(e && e.message) || 'ошибка сервера'}`;
+      setMsgs((prev) => [...prev, { role: 'assistant', content: msg }]);
     }
     setBusy(false);
     loadHistory();
     inputRef.current?.focus();
-  }, [input, busy, sid, loadHistory]);
+  }, [input, busy, sid, loadHistory, showToast]);
 
-  async function submitLead({ name, phone, company, consent }) {
-    const d = await api('/api/lead', 'POST', { session_id: sid, name, phone, company, consent });
-    if (d.ok) {
+  async function openLead() {
+    try {
+      const draft = await api(`/api/sessions/${sid}/lead/draft`, 'POST', {});
+      setLeadDraft(draft);
+    } catch { setLeadDraft(null); }
+    setLeadOpen(true);
+  }
+
+  async function submitLead({ full_name, phone, company, consent }) {
+    try {
+      await api(`/api/sessions/${sid}/lead`, 'POST', { full_name, phone, company, consent });
       setLeadOpen(false);
       showToast('Заявка отправлена, резюме диалога передано менеджеру');
       loadHistory();
+      try {
+        const s = await api(`/api/sessions/${sid}`);
+        if (Array.isArray(s.messages)) setMsgs(s.messages.map((m) => ({ role: m.role, content: m.content })));
+      } catch {}
       return true;
+    } catch (e) {
+      return (e && e.message) || 'Не удалось отправить заявку';
     }
-    showToast(d.error || 'Не удалось отправить заявку');
-    return false;
+  }
+
+  async function doHandoff() {
+    if (!sid || busy) return;
+    try {
+      const d = await api(`/api/sessions/${sid}/handoff`, 'POST', {});
+      if (d.assistant_message && d.assistant_message.content) setMsgs((prev) => [...prev, { role: 'assistant', content: d.assistant_message.content }]);
+      showToast('Вопрос передан специалисту');
+    } catch (e) {
+      showToast((e && e.message) || 'Не удалось передать вопрос');
+    }
   }
 
   const hasUserMsg = msgs.some((m) => m.role === 'user');
@@ -101,6 +136,7 @@ export default function App() {
         <div className="brand"><div className="mark">МТС</div><div>EnergyTool<small>ИИ-консультант по энергетике для бизнеса</small></div></div>
         <div className="actions">
           <button className="btn menu" type="button" onClick={() => setSideOpen((v) => !v)}>Меню</button>
+          <button className="btn" type="button" aria-label="Переключить тему" onClick={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}>{theme === 'dark' ? '☀️ Светлая' : '🌙 Тёмная'}</button>
           <button className="btn" type="button" onClick={() => setShowDebug((v) => !v)}>Отладка</button>
           <button className="btn primary" type="button" onClick={startFresh}>Новый диалог</button>
         </div>
@@ -132,11 +168,11 @@ export default function App() {
                 onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }} />
               <button className="btn primary" type="button" onClick={() => send()}>Отправить</button>
             </div>
-            <div className="lead-row"><button className="linkbtn" type="button" onClick={() => setLeadOpen(true)}>Оставить заявку менеджеру →</button></div>
+            <div className="lead-row"><button className="linkbtn" type="button" onClick={openLead}>Оставить заявку менеджеру →</button><button className="linkbtn" type="button" onClick={doHandoff}>Передать специалисту →</button></div>
           </div>
         </main>
       </div>
-      <LeadModal open={leadOpen} onClose={() => setLeadOpen(false)} onSubmit={submitLead} />
+      <LeadModal open={leadOpen} draft={leadDraft} onClose={() => setLeadOpen(false)} onSubmit={submitLead} />
       <div className={toast ? 'toast on' : 'toast'}>{toast || 'Заявка отправлена'}</div>
     </>
   );
