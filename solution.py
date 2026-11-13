@@ -6,6 +6,7 @@ import csv
 import importlib
 import os
 import queue
+import sys
 import tempfile
 import threading
 import time
@@ -25,6 +26,8 @@ TIMEOUT_ANSWER = (
     "Опишите, пожалуйста, ситуацию подробнее или оставьте заявку, и специалист "
     "МТС EnergyTool свяжется с вами."
 )
+# Тот же нейтральный ответ при сбое движка на отдельном вопросе.
+FALLBACK_ANSWER = TIMEOUT_ANSWER
 ROLE_LABELS = {"пользователь": "user", "ассистент": "assistant"}
 
 
@@ -189,31 +192,32 @@ def run_adapter(
     outcomes = _consult_all(requests, consult, max_workers, deadline)
     results: list[tuple[str, str]] = []
     for row_number, ((item_id, _), outcome) in enumerate(zip(questions, outcomes), start=2):
-        if outcome is None:
-            # Не успели до конца бюджета времени. Лучше нейтральный ответ,
-            # чем тайм-аут всего запуска и пустой сабмит.
-            results.append((item_id, TIMEOUT_ANSWER))
-            continue
-        response, error = outcome
-        if error is not None:
-            # Не печатаем текст исключения, сторонние клиенты могут включить
-            # в него URL, заголовки или фрагмент запроса.
-            raise ConsultantIntegrationError(
-                f"Consultant Engine завершился ошибкой для строки {row_number} "
-                f"({type(error).__name__})"
-            ) from None
-        if not isinstance(response, ConsultantResponse):
-            raise ConsultantIntegrationError("Engine должен вернуть ConsultantResponse")
-        answer = response.answer.strip() if isinstance(response.answer, str) else ""
-        if not answer:
-            raise ConsultantIntegrationError(f"Engine вернул пустой ответ для строки {row_number}")
-        if len(answer) > MAX_ANSWER_CHARS:
-            raise ConsultantIntegrationError(
-                f"Ответ для строки {row_number} превышает лимит {MAX_ANSWER_CHARS} символов"
-            )
+        answer, problem = _answer_from_outcome(outcome)
+        if problem:
+            # Один сбой не должен оставить весь запуск без submission.csv.
+            # Печатаем только номер строки и тип проблемы, без текста исключения,
+            # в нём могут оказаться URL, заголовки или фрагмент запроса.
+            print(f"Строка {row_number}: {problem}, записан запасной ответ", file=sys.stderr)
         results.append((item_id, answer))
     write_submission(output_path, results)
     return len(results)
+
+
+def _answer_from_outcome(outcome: Optional[Outcome]) -> tuple[str, str]:
+    """Возвращает ответ для CSV и описание проблемы, если ответ запасной."""
+    if outcome is None:
+        return TIMEOUT_ANSWER, "не успели до конца бюджета времени"
+    response, error = outcome
+    if error is not None:
+        return FALLBACK_ANSWER, f"ошибка Consultant Engine ({type(error).__name__})"
+    if not isinstance(response, ConsultantResponse):
+        return FALLBACK_ANSWER, "Engine вернул не ConsultantResponse"
+    answer = response.answer.strip() if isinstance(response.answer, str) else ""
+    if not answer:
+        return FALLBACK_ANSWER, "Engine вернул пустой ответ"
+    if len(answer) > MAX_ANSWER_CHARS:
+        return answer[:MAX_ANSWER_CHARS].rstrip(), ""
+    return answer, ""
 
 
 def _find_input(data_dir: Path, filename: str) -> Path:
