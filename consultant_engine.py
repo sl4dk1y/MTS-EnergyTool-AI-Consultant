@@ -189,15 +189,37 @@ def _float_env(name: str, default: float) -> float:
     return value if 0 <= value < 1 else default
 
 
+def build_retriever(kb_path: Optional[Path]) -> Optional[Retriever]:
+    """Основной RAG из rag_engine.py, если он есть, иначе временный BM25.
+
+    RETRIEVER=bm25 принудительно включает BM25, это удобно для сравнения
+    на платформе и как запасной вариант, если RAG поведёт себя плохо.
+    """
+    if kb_path is None:
+        return None
+    if os.environ.get("RETRIEVER", "").strip().lower() != "bm25":
+        try:
+            import rag_engine
+        except ImportError:
+            rag_engine = None
+        if rag_engine is not None:
+            try:
+                return rag_engine.from_path(kb_path)
+            except Exception:
+                pass
+    from kb_search import KnowledgeBaseSearch
+
+    return KnowledgeBaseSearch.from_path(kb_path)
+
+
 def build_default_engine() -> ConsultantEngine:
     """Собирает движок из окружения конкурсной платформы."""
-    from kb_search import KnowledgeBaseSearch, find_knowledge_base
+    from kb_search import find_knowledge_base
     from llm_client import LLMClient
 
     data_dir = Path(os.environ.get("DATA_DIR", "data"))
     kb_path = find_knowledge_base(data_dir, (Path(__file__).resolve().parent / data_dir, Path.cwd()))
-    # Здесь подключается основной RAG, когда он появится в репозитории.
-    retriever = KnowledgeBaseSearch.from_path(kb_path) if kb_path else None
+    retriever = build_retriever(kb_path)
     # По умолчанию клиент ждёт 90 с и делает 3 попытки, это до 4,5 минут на
     # один зависший вопрос. Для конкурса хватит 40 с и двух попыток.
     llm = LLMClient.from_env(

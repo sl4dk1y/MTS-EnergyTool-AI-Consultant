@@ -1,6 +1,8 @@
 import importlib.util
 import os
+import sys
 import tempfile
+import types
 import unittest
 import zipfile
 from pathlib import Path
@@ -251,11 +253,40 @@ class KnowledgeBaseSearchTests(unittest.TestCase):
         self.assertEqual(misses[0.0], ["2"])
 
     def test_default_engine_reads_kb_from_data_dir(self):
-        env = {"DATA_DIR": str(self.root), "LLM_BASE_URL": "http://proxy", "LLM_API_KEY": "k", "LLM_MODEL": "m"}
+        env = {
+            "DATA_DIR": str(self.root),
+            "LLM_BASE_URL": "http://proxy",
+            "LLM_API_KEY": "k",
+            "LLM_MODEL": "m",
+            "RETRIEVER": "bm25",
+        }
         with mock.patch.dict(os.environ, env, clear=False):
             engine = consultant_engine.build_default_engine()
         self.assertIsInstance(engine._retriever, KnowledgeBaseSearch)
         self.assertGreater(len(engine._retriever), 0)
+
+    def test_rag_engine_is_used_when_present(self):
+        fake_rag = types.ModuleType("rag_engine")
+        sentinel = object()
+        fake_rag.from_path = lambda path: sentinel
+        with mock.patch.dict(sys.modules, {"rag_engine": fake_rag}), mock.patch.dict(os.environ, {"RETRIEVER": ""}):
+            self.assertIs(consultant_engine.build_retriever(self.zip_path), sentinel)
+        with mock.patch.dict(sys.modules, {"rag_engine": fake_rag}), mock.patch.dict(os.environ, {"RETRIEVER": "bm25"}):
+            self.assertIsInstance(consultant_engine.build_retriever(self.zip_path), KnowledgeBaseSearch)
+
+    def test_broken_or_missing_rag_falls_back_to_bm25(self):
+        broken = types.ModuleType("rag_engine")
+
+        def fail(path):
+            raise RuntimeError("index")
+
+        broken.from_path = fail
+        with mock.patch.dict(sys.modules, {"rag_engine": broken}), mock.patch.dict(os.environ, {"RETRIEVER": ""}):
+            self.assertIsInstance(consultant_engine.build_retriever(self.zip_path), KnowledgeBaseSearch)
+        # None в sys.modules заставляет import выбросить ImportError, как будто модуля нет.
+        with mock.patch.dict(sys.modules, {"rag_engine": None}), mock.patch.dict(os.environ, {"RETRIEVER": ""}):
+            self.assertIsInstance(consultant_engine.build_retriever(self.zip_path), KnowledgeBaseSearch)
+        self.assertIsNone(consultant_engine.build_retriever(None))
 
 
 if __name__ == "__main__":
