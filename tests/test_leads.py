@@ -5,6 +5,7 @@ from leads import (
     LeadDraft,
     extract_contacts,
     find_phone,
+    mask_contacts,
     missing_fields_message,
     normalize_company,
     normalize_full_name,
@@ -155,6 +156,41 @@ class PrepareLeadTests(unittest.TestCase):
         draft = prepare_lead(HISTORY, None, form={"full_name": "Тестов Тест", "company": "Ромашка"})
         self.assertTrue(draft.is_complete)
         self.assertTrue(draft.summary.startswith("Запрос клиента"))
+
+
+
+class MaskingTests(unittest.TestCase):
+    def test_mask_phones_emails_and_names(self):
+        text = "Тестов Тест Тестович, ООО Ромашка, 8 (900) 123-45-67, test@example.com, склад 800 м²"
+        masked = mask_contacts(text)
+        for secret in ("Тестов", "123-45-67", "test@example.com"):
+            self.assertNotIn(secret, masked)
+        self.assertIn("ООО Ромашка", masked)
+        self.assertIn("800 м²", masked)
+        self.assertEqual(mask_contacts("Меня зовут Тест Тестов"), "Меня зовут [ФИО]")
+
+    def test_mask_known_values_and_surname(self):
+        masked = mask_contacts("Клиент Тестов просит перезвонить", known=["Тестов Тест", "+79001234567"])
+        self.assertEqual(masked, "Клиент [ФИО] просит перезвонить")
+
+    def test_fallback_summary_has_no_contacts(self):
+        summary = summarize_dialog(HISTORY, None)
+        self.assertTrue(summary.startswith("Запрос клиента: Хотим поставить"))
+        for secret in ("Тестов", "Тестович", "123-45-67", "8 (900)"):
+            self.assertNotIn(secret, summary)
+
+    def test_model_summary_is_masked_too(self):
+        llm = ScriptedLLM("Тестов Тест просит перезвонить на 8 900 123-45-67 по станции.")
+        summary = summarize_dialog(HISTORY, llm, known_contacts=["Тестов Тест"])
+        self.assertNotIn("Тестов", summary)
+        self.assertNotIn("123-45-67", summary)
+        self.assertIn("станции", summary)
+
+    def test_prepare_lead_masks_contacts_from_form(self):
+        history = [{"role": "user", "content": "Я Пробный Пётр, нужна станция на складе"}]
+        draft = prepare_lead(history, None, form={"full_name": "Пробный Пётр", "phone": "89001234567", "company": "Ромашка"})
+        self.assertEqual(draft.full_name, "Пробный Пётр")
+        self.assertNotIn("Пробный", draft.summary)
 
 
 if __name__ == "__main__":
