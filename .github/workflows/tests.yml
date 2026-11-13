@@ -4,6 +4,8 @@ on:
   pull_request:
     branches:
       - main
+      # PR, открытые поверх другой ветки, тоже проверяются.
+      - "feature/**"
   push:
     branches:
       - main
@@ -41,4 +43,29 @@ jobs:
         run: PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pycache" python -m py_compile solution.py llm_client.py consultant_contracts.py
 
       - name: Запустить unit-тесты
+        run: python -m unittest discover -s tests -v
+
+  backend:
+    name: Backend API, Python 3.11
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Получить исходный код
+        uses: actions/checkout@v7
+
+      - name: Настроить Python 3.11
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Установить зависимости backend
+        run: python -m pip install -r backend/requirements.txt
+
+      - name: Проверить синтаксис backend
+        run: PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pycache" python -m py_compile backend/app.py backend/storage.py leads.py consultant_engine.py
+
+      - name: Запустить все тесты вместе с API
+        # Без FastAPI тесты API здесь падают, а не пропускаются.
+        env:
+          REQUIRE_API_TESTS: "1"
         run: python -m unittest discover -s tests -v
