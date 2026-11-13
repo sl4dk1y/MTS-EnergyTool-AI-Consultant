@@ -157,6 +157,16 @@ class EngineTests(unittest.TestCase):
         build.assert_called_once()
 
 
+    def test_contact_rule_only_in_web_mode(self):
+        competition_llm, web_llm = FakeLLM(), FakeLLM()
+        ConsultantEngine(competition_llm, FakeRetriever(CHUNKS)).consult(ConsultantRequest(question="Вопрос"))
+        ConsultantEngine(web_llm, FakeRetriever(CHUNKS), collect_contacts=True).consult(
+            ConsultantRequest(question="Вопрос")
+        )
+        self.assertNotIn("попроси ФИО", competition_llm.calls[0][0]["content"])
+        self.assertIn("попроси ФИО", web_llm.calls[0][0]["content"])
+        self.assertNotIn("ФИО", consultant_engine.SYSTEM_PROMPT)
+
 class PromptHelpersTests(unittest.TestCase):
     def test_search_query_includes_short_question_and_history(self):
         request = ConsultantRequest(
