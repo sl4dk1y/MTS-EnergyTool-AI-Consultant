@@ -466,6 +466,11 @@ def _rerank(query: str, documents: Sequence[str], timeout: float = 20.0) -> Opti
     except Exception as exc:
         _log(f"реранкер недоступен: {type(exc).__name__}")
         return None
+    if not isinstance(payload, dict):
+        # Прокси может вернуть JSON null, список или строку. Обращение к .get()
+        # на таком значении уронило бы весь поиск и потеряло результаты BM25.
+        _log("реранкер: ответ не объект, оставляем исходный порядок")
+        return None
     items = payload.get("results") or payload.get("data") or []
     if not isinstance(items, list) or len(items) != len(documents):
         _log("реранкер: число результатов не совпадает с числом документов")

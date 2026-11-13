@@ -261,6 +261,28 @@ class RetrievalTests(unittest.TestCase):
         for response in (bad_index, duplicate_index, non_numeric):
             self.assertEqual(self._order_with_rerank(response), baseline)
 
+    def test_rerank_null_response_keeps_bm25_results(self) -> None:
+        """JSON null от /rerank не должен обнулять выдачу BM25."""
+        baseline = self._baseline_order()
+
+        def response(path, body, timeout=0, attempts=0):
+            return None
+
+        order = self._order_with_rerank(response)
+        self.assertTrue(order, "BM25-результаты не должны теряться")
+        self.assertEqual(order, baseline)
+
+    def test_rerank_non_object_response_keeps_bm25_results(self) -> None:
+        """Не-объект верхнего уровня (список, строка, число) не ломает поиск."""
+        baseline = self._baseline_order()
+        for payload in (["лишний элемент"], "ошибка прокси", 42):
+            def response(path, body, timeout=0, attempts=0, payload=payload):
+                return payload
+
+            order = self._order_with_rerank(response)
+            self.assertTrue(order, "BM25-результаты не должны теряться")
+            self.assertEqual(order, baseline)
+
     def _order_with_embeddings(self, response, query: str = "Крыша на два ската"):
         environment = {"EMB_MODEL": "test-embed", "LLM_BASE_URL": "http://proxy.local"}
         with mock.patch.dict(os.environ, environment, clear=False):
