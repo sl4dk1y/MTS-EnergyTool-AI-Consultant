@@ -1,6 +1,6 @@
 # MTS EnergyTool AI Consultant
 
-AI-консультант для B2B-клиентов EnergyTool по кейсу МТС на [Changellenge >> Hack&Change 2026](https://changellenge.com/championships/khakaton-hack-change-2026/). Проект готовит ответы по предоставленной базе знаний и учитывает историю короткого диалога.
+AI-консультант для B2B-клиентов EnergyTool по кейсу МТС на [Changellenge >> Hack&Change 2026](https://changellenge.com/championships/khakaton-hack-change-2026/). Проект команды «Рено Логан 2007» готовит ответы по предоставленной базе знаний и учитывает историю короткого диалога.
 
 ## Архитектура
 
