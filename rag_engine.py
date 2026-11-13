@@ -47,6 +47,12 @@ RERANK_CANDIDATES = 15
 # RRF даёт почти одинаковые значения и отсев не срабатывает.
 LEXICAL_WEIGHT = 0.6
 DENSE_WEIGHT = 0.4
+# Минимальное косинусное сходство, при котором фрагмент векторного канала
+# допускается в выдачу. Нужно, чтобы на посторонний вопрос вроде «сколько стоит
+# билет» в контекст не попадали случайные разделы базы. Значение калибруется
+# замером на размеченных вопросах: слишком высокий порог режет полезные
+# фрагменты перефраз, слишком низкий пропускает мусор.
+DENSE_MIN_SIMILARITY = 0.25
 
 # Границы чанка в символах: 800 токенов ~ 3000-3200 символов для русского текста.
 MAX_CHUNK_CHARS = 3200
@@ -185,14 +191,18 @@ def split_markdown(text: str, source_prefix: str) -> List[Tuple[str, str]]:
             chunks.append((source, piece))
 
     # Короткие хвосты приклеиваем к предыдущему чанку, если вместе влезают.
+    # Склеивать можно только фрагменты одного раздела: иначе текст второго
+    # раздела получит source первого, и движок покажет неверный источник.
     merged: List[Tuple[str, str]] = []
     for source, piece in chunks:
+        previous_source, previous_text = merged[-1] if merged else ("", "")
         if (
             merged
+            and source == previous_source
             and len(piece) < MIN_CHUNK_CHARS
-            and len(merged[-1][1]) + len(piece) <= MAX_CHUNK_CHARS
+            and len(previous_text) + len(piece) <= MAX_CHUNK_CHARS
         ):
-            merged[-1] = (merged[-1][0], merged[-1][1] + "\n\n" + piece)
+            merged[-1] = (previous_source, previous_text + "\n\n" + piece)
             continue
         merged.append((source, piece))
     return merged
@@ -561,19 +571,35 @@ class RagRetriever:
         assert self._bm25 is not None
         tokens = _tokenize(query)
         lexical = self._bm25.search(tokens, CANDIDATES_PER_CHANNEL)
-        vectors = (
-            self._dense.search(self._query_vector(query), CANDIDATES_PER_CHANNEL)
-            if self._dense
-            else []
-        )
+        vectors: List[Tuple[int, float]] = []
+        if self._dense is not None:
+            try:
+                vectors = self._dense.search(self._query_vector(query), CANDIDATES_PER_CHANNEL)
+            except Exception as exc:
+                # Таймаут или ошибка эмбеддингов не должны обнулять выдачу:
+                # результаты BM25 уже получены и остаются валидными.
+                _log(f"векторный канал недоступен, остаёмся на BM25: {type(exc).__name__}")
+                vectors = []
 
         fused: Dict[int, float] = {}
         lexical_max = max((score for _, score in lexical), default=0.0)
         for index, score in lexical:
             fused[index] = LEXICAL_WEIGHT * (score / lexical_max if lexical_max > 0 else 0.0)
+
+        kept = 0
         for index, similarity in vectors:
+            if similarity < DENSE_MIN_SIMILARITY:
+                continue
+            kept += 1
             # Косинус лежит в [-1, 1], переводим в [0, 1].
             fused[index] = fused.get(index, 0.0) + DENSE_WEIGHT * ((similarity + 1.0) / 2.0)
+        dropped = len(vectors) - kept
+        if dropped:
+            _log(
+                "векторный канал: отсечено {0} фрагментов ниже порога {1}".format(
+                    dropped, DENSE_MIN_SIMILARITY
+                )
+            )
         if not fused:
             return []
 

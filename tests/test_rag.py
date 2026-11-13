@@ -37,10 +37,10 @@ SOLAR_DOC = """# Солнечные станции
 
 ASKUE_DOC = """# Учёт энергоресурсов
 
-## Совместимость SIM-карт
+## Совместимость модемов
 
-Приборы с сим-картами других операторов также подключаются: менять SIM-карты
-при подключении не нужно, платформа работает с любым оператором.
+Сим-карта стороннего оператора подойдёт: менять её при подключении не нужно,
+связь с платформой идёт через любого мобильного оператора.
 """
 
 TARIFF_DOC = """# Тарифы
@@ -82,10 +82,15 @@ class ChunkingTests(unittest.TestCase):
         for _, text in chunks:
             self.assertLessEqual(len(text), MAX_CHUNK_CHARS + 200)
 
-    def test_short_sections_are_merged(self) -> None:
-        doc = "# А\n\nКоротко.\n\n# Б\n\nТоже коротко.\n"
+    def test_merge_does_not_mix_sources(self) -> None:
+        """Короткие разделы с разными заголовками не склеиваются."""
+        doc = "# Раздел А\n\nКороткий текст про тарифы.\n\n# Раздел Б\n\nКороткий текст про счётчики.\n"
         chunks = split_markdown(doc, "short.md")
-        self.assertLessEqual(len(chunks), 2)
+        self.assertEqual(len(chunks), 2)
+        self.assertTrue(chunks[0][0].endswith("Раздел А"))
+        self.assertTrue(chunks[1][0].endswith("Раздел Б"))
+        self.assertNotIn("счётчик", chunks[0][1])
+        self.assertNotIn("тариф", chunks[1][1])
 
     def test_empty_document_gives_no_chunks(self) -> None:
         self.assertEqual(split_markdown("   \n\n", "empty.md"), [])
@@ -121,7 +126,7 @@ class RetrievalTests(unittest.TestCase):
             "В счётчиках стоят симки другого оператора. Для вашей платформы их надо менять?", top_k=5
         )
         self.assertTrue(chunks)
-        self.assertIn("сим-карт", chunks[0].text)
+        self.assertIn("сим-карт", chunks[0].text.lower())
 
     def test_scores_are_positive_floats(self) -> None:
         """Движок режет по 0.5 * max(score): ноль и отрицательные значения ломают отсев."""
@@ -143,6 +148,34 @@ class RetrievalTests(unittest.TestCase):
             retriever = RagRetriever(self.kb_root, use_dense=True)
             chunks = retriever.retrieve("крыша скаты панели", top_k=5)
         self.assertTrue(chunks, "без эмбеддингов BM25 должен продолжать работать")
+
+    def test_bm25_fallback_when_dense_search_fails(self) -> None:
+        """Ошибка векторного поиска не обнуляет выдачу: остаются результаты BM25."""
+        with mock.patch.object(
+            rag_engine, "_embed_texts", side_effect=lambda texts: [[0.5, 0.5] for _ in texts]
+        ):
+            retriever = RagRetriever(self.kb_root, use_dense=True)
+            retriever.retrieve("прогрев", top_k=1)
+            with mock.patch.object(RagRetriever, "_query_vector", side_effect=RuntimeError("таймаут")):
+                chunks = retriever.retrieve("Крыша на два ската, панели на восток", top_k=5)
+        self.assertTrue(chunks, "при падении dense должны вернуться результаты BM25")
+        self.assertIn("23-solar.md", chunks[0].source)
+
+    def test_dense_low_similarity_is_filtered(self) -> None:
+        """Фрагменты с косинусом ниже порога не добавляются к выдаче."""
+
+        def fake_embed(texts):
+            # Документы получают [1, 0], запрос — [0, 1]: косинус 0 ниже порога.
+            if len(texts) == 1:
+                return [[0.0, 1.0]]
+            return [[1.0, 0.0] for _ in texts]
+
+        with mock.patch.object(rag_engine, "_embed_texts", side_effect=fake_embed):
+            dense = RagRetriever(self.kb_root, use_dense=True).retrieve("Крыша на два ската панели", top_k=5)
+        lexical = self._retriever().retrieve("Крыша на два ската панели", top_k=5)
+        self.assertTrue(dense)
+        self.assertEqual([chunk.source for chunk in dense], [chunk.source for chunk in lexical])
+        self.assertLess(rag_engine.DENSE_MIN_SIMILARITY, 1.0)
 
     def test_reranker_scores_are_positive(self) -> None:
         def fake_embed(texts):
