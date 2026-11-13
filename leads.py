@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import asdict, dataclass, field
-from typing import Mapping, Optional, Sequence
+from typing import Iterable, Mapping, Optional, Sequence
 
 from consultant_engine import ChatModel, clean_answer
 
@@ -19,7 +19,13 @@ FIELD_LABELS = {"full_name": "ФИО", "phone": "телефон", "company": "н
 MAX_SUMMARY_CHARS = 1000
 
 _NAME_RE = re.compile(r"^[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё'\-]*(?: [A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё'\-]*){1,3}$")
-_PHONE_CANDIDATE_RE = re.compile(r"(?:\+?\d[\s\-()]*){10,15}")
+_PHONE_CANDIDATE_RE = re.compile(r"\+?\d(?:[\s\-()]*\d){9,14}")
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_PATRONYMIC_NAME_RE = re.compile(r"\b[А-ЯЁ][а-яё-]+ [А-ЯЁ][а-яё]+ [А-ЯЁ][а-яё]+(?:вич|вна|ична|инична|ич)\b")
+_NAME_INTRO_RE = re.compile(
+    r"((?:меня зовут|моё имя|мое имя|фио|контактное лицо)\s*[:\-]?\s*)[А-ЯЁA-Z][а-яёa-z-]+(?:\s+[А-ЯЁA-Z][а-яёa-z-]+){0,2}",
+    re.IGNORECASE,
+)
 _REQUEST_INTENT_RE = re.compile(
     r"оставить заявк|оформить заявк|оставлю заявк|отправьте заявк|заявку менеджер|"
     r"свяжитесь со мной|свяжитесь с нами|перезвоните|позвоните мне|"
@@ -182,7 +188,37 @@ def extract_contacts(history: Sequence[Mapping[str, str]], llm: Optional[ChatMod
     return result
 
 
-def summarize_dialog(history: Sequence[Mapping[str, str]], llm: Optional[ChatModel]) -> str:
+def mask_contacts(text: str, known: Iterable[str] = ()) -> str:
+    """Убирает из текста телефоны, почту и ФИО.
+
+    Резюме лежит в заявке рядом с контактами, дублировать их там незачем.
+    ФИО ищется по известным значениям из формы и диалога, по фразе «меня зовут»
+    и по сочетанию из трёх слов с отчеством.
+    """
+    result = text or ""
+    for value in sorted({v.strip() for v in known if v and v.strip()}, key=len, reverse=True):
+        if normalize_phone(value):
+            continue
+        result = re.sub(re.escape(value), "[ФИО]", result, flags=re.IGNORECASE)
+        surname = value.split()[0]
+        if len(surname) >= 4:
+            result = re.sub(rf"\b{re.escape(surname)}\b", "[ФИО]", result, flags=re.IGNORECASE)
+    result = _EMAIL_RE.sub("[почта]", result)
+    result = _PHONE_CANDIDATE_RE.sub(
+        lambda m: "[телефон]" if len(re.sub(r"\D", "", m.group(0))) >= 10 else m.group(0), result
+    )
+    result = _PATRONYMIC_NAME_RE.sub("[ФИО]", result)
+    result = _NAME_INTRO_RE.sub(lambda m: m.group(1) + "[ФИО]", result)
+    return result
+
+
+def summarize_dialog(
+    history: Sequence[Mapping[str, str]],
+    llm: Optional[ChatModel],
+    known_contacts: Iterable[str] = (),
+) -> str:
+    """Резюме для менеджера. Контакты в нём маскируются в любом случае."""
+    known = list(known_contacts)
     dialog = _dialog_text(history)
     if not dialog:
         return ""
@@ -192,12 +228,12 @@ def summarize_dialog(history: Sequence[Mapping[str, str]], llm: Optional[ChatMod
                 llm.complete([{"role": "system", "content": SUMMARY_PROMPT}, {"role": "user", "content": dialog}])
             )
             if summary:
-                return summary[:MAX_SUMMARY_CHARS]
+                return mask_contacts(summary, known)[:MAX_SUMMARY_CHARS]
         except Exception:
             pass
     # Без модели отдаём реплики клиента, менеджеру этого хватит, чтобы понять запрос.
     user_text = " ".join(_user_text(history).split())
-    return ("Запрос клиента: " + user_text)[:MAX_SUMMARY_CHARS]
+    return mask_contacts("Запрос клиента: " + user_text, known)[:MAX_SUMMARY_CHARS]
 
 
 def prepare_lead(
@@ -207,10 +243,12 @@ def prepare_lead(
 ) -> LeadDraft:
     """Черновик заявки из диалога. Данные формы важнее найденных в диалоге."""
     fields = extract_contacts(history, llm)
+    found_in_dialog = [fields["full_name"], fields["phone"]]
     for name, value in (form or {}).items():
         if name in REQUIRED_FIELDS and value and value.strip():
             fields[name] = value
-    return validate_lead(fields, summarize_dialog(history, llm))
+    known = found_in_dialog + [fields["full_name"], fields["phone"]]
+    return validate_lead(fields, summarize_dialog(history, llm, known))
 
 
 def missing_fields_message(draft: LeadDraft) -> str:
