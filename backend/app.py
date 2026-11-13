@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 import threading
@@ -21,9 +22,10 @@ from pydantic import BaseModel, Field
 
 from backend.storage import Storage
 from consultant_contracts import ConsultantRequest
-from consultant_engine import ConsultantEngine, get_engine
+from consultant_engine import ConsultantEngine, build_default_engine
 from leads import (
     REQUIRED_FIELDS,
+    mask_contacts,
     missing_fields_message,
     prepare_lead,
     summarize_dialog,
@@ -34,6 +36,7 @@ from leads import (
 logger = logging.getLogger("energytool.backend")
 
 MAX_MESSAGE_CHARS = 4000
+MAX_LOOKUP_IDS = 50
 LEAD_SAVED_MESSAGE = (
     "Спасибо, заявка передана менеджеру МТС EnergyTool. Он свяжется с вами по указанному телефону. "
     "Если появятся вопросы, можно продолжить разговор здесь."
@@ -57,6 +60,10 @@ class LeadFieldsIn(BaseModel):
 class LeadIn(LeadFieldsIn):
     summary: Optional[str] = Field(default=None, max_length=2000)
     consent: bool = False
+
+
+class SessionLookupIn(BaseModel):
+    ids: list[str] = Field(default_factory=list, max_length=MAX_LOOKUP_IDS)
 
 
 class HandoffIn(BaseModel):
@@ -91,9 +98,14 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def build_web_engine() -> ConsultantEngine:
+    """Движок веб-прототипа. В отличие от конкурсного, просит контакты для заявки."""
+    return build_default_engine(collect_contacts=True)
+
+
 def create_app(
     storage: Optional[Storage] = None,
-    engine_factory: Callable[[], ConsultantEngine] = get_engine,
+    engine_factory: Callable[[], ConsultantEngine] = build_web_engine,
     admin_token: Optional[str] = None,
 ) -> FastAPI:
     storage = storage or Storage(os.environ.get("DATABASE_PATH", "local-data/web.sqlite3"))
@@ -118,7 +130,10 @@ def create_app(
         return session
 
     def require_admin(x_admin_token: Optional[str] = Header(default=None)) -> None:
-        if admin_token and x_admin_token != admin_token:
+        # Без ADMIN_TOKEN административные списки закрыты, а не открыты всем.
+        if not admin_token:
+            raise HTTPException(status_code=403, detail="Административный доступ выключен, задайте ADMIN_TOKEN")
+        if not x_admin_token or not hmac.compare_digest(x_admin_token.encode(), admin_token.encode()):
             raise HTTPException(status_code=401, detail="Нужен токен администратора")
 
     def require_engine() -> ConsultantEngine:
@@ -138,6 +153,11 @@ def create_app(
     @app.get("/api/sessions", dependencies=[Depends(require_admin)])
     def list_sessions(limit: int = 100) -> list:
         return storage.list_sessions(min(max(limit, 1), 500))
+
+    @app.post("/api/sessions/lookup")
+    def lookup_sessions(body: SessionLookupIn) -> list:
+        """История для клиента. Отдаёт только сессии, id которых клиент уже знает."""
+        return storage.list_sessions_by_ids(body.ids)
 
     @app.get("/api/sessions/{session_id}")
     def get_session(session_id: str) -> dict:
@@ -173,10 +193,11 @@ def create_app(
     @app.post("/api/sessions/{session_id}/lead/draft")
     def lead_draft(session_id: str, body: LeadFieldsIn) -> dict:
         require_session(session_id)
-        engine = provider.get()
+        # До согласия на обработку данных история с контактами в модель не уходит.
+        # Черновик собирается регулярками и маскированным резюме из реплик клиента.
         draft = prepare_lead(
             storage.get_history(session_id),
-            engine.llm if engine else None,
+            None,
             form={k: v for k, v in body.model_dump().items() if v},
         )
         return {**draft.to_dict(), "message": missing_fields_message(draft)}
@@ -186,11 +207,13 @@ def create_app(
         require_session(session_id)
         if not body.consent:
             raise HTTPException(status_code=422, detail="Нужно согласие на обработку контактных данных")
-        summary = (body.summary or "").strip()
-        if not summary:
-            engine = provider.get()
-            summary = summarize_dialog(storage.get_history(session_id), engine.llm if engine else None)
         fields = {name: getattr(body, name) or "" for name in REQUIRED_FIELDS}
+        known = [fields["full_name"], fields["phone"]]
+        summary = mask_contacts((body.summary or "").strip(), known)
+        if not summary:
+            # Согласие получено, теперь резюме может написать модель.
+            engine = provider.get()
+            summary = summarize_dialog(storage.get_history(session_id), engine.llm if engine else None, known)
         draft = validate_lead(fields, summary or "Клиент оставил заявку без описания задачи.")
         if not draft.is_complete:
             raise HTTPException(

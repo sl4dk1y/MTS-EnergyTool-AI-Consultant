@@ -86,17 +86,31 @@ class Storage:
             row = db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
         return dict(row) if row else None
 
+    _SESSION_SUMMARY = """
+        SELECT s.id, s.created_at, s.updated_at,
+               (SELECT content FROM messages m WHERE m.session_id = s.id AND m.role = 'user'
+                ORDER BY m.id LIMIT 1) AS title,
+               (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count,
+               EXISTS (SELECT 1 FROM leads l WHERE l.session_id = s.id) AS has_lead
+        FROM sessions s {where} ORDER BY s.updated_at DESC, s.created_at DESC LIMIT ?
+    """
+
     def list_sessions(self, limit: int = 100) -> list[dict]:
-        query = """
-            SELECT s.id, s.created_at, s.updated_at,
-                   (SELECT content FROM messages m WHERE m.session_id = s.id AND m.role = 'user'
-                    ORDER BY m.id LIMIT 1) AS title,
-                   (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count,
-                   EXISTS (SELECT 1 FROM leads l WHERE l.session_id = s.id) AS has_lead
-            FROM sessions s ORDER BY s.updated_at DESC, s.created_at DESC LIMIT ?
-        """
         with self._connect() as db:
-            rows = db.execute(query, (limit,)).fetchall()
+            rows = db.execute(self._SESSION_SUMMARY.format(where=""), (limit,)).fetchall()
+        return self._summaries(rows)
+
+    def list_sessions_by_ids(self, ids: list[str]) -> list[dict]:
+        unique = list(dict.fromkeys(i for i in ids if isinstance(i, str) and i))
+        if not unique:
+            return []
+        where = "WHERE s.id IN (" + ",".join("?" for _ in unique) + ")"
+        with self._connect() as db:
+            rows = db.execute(self._SESSION_SUMMARY.format(where=where), (*unique, len(unique))).fetchall()
+        return self._summaries(rows)
+
+    @staticmethod
+    def _summaries(rows) -> list[dict]:
         result = []
         for row in rows:
             item = dict(row)

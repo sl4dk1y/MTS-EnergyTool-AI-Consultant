@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -6,13 +7,21 @@ from pathlib import Path
 
 try:
     from fastapi.testclient import TestClient
-except ImportError:  # конкурсное окружение и CI без зависимостей веба
+except ImportError:  # конкурсное окружение без зависимостей веба
+    if os.environ.get("REQUIRE_API_TESTS"):
+        # В CI-задаче backend тесты API обязаны запуститься, пропуск там ошибка.
+        raise
     raise unittest.SkipTest("FastAPI не установлен, ставится из backend/requirements.txt")
 
+from unittest import mock
+
+from backend import app as backend_app
 from backend.app import LEAD_SAVED_MESSAGE, create_app
 from backend.storage import Storage
 from consultant_contracts import RetrievedChunk
 from consultant_engine import ConsultantEngine
+
+ADMIN = {"X-Admin-Token": "test-admin"}
 
 # Только выдуманные данные.
 LEAD = {"full_name": "тестов тест", "phone": "8 900 123-45-67", "company": "ООО Ромашка", "consent": True}
@@ -45,7 +54,7 @@ class ApiTests(unittest.TestCase):
         self.storage = Storage(self.db_path)
         self.llm = EchoLLM()
         engine = ConsultantEngine(self.llm, OneChunkRetriever())
-        self.client = TestClient(create_app(self.storage, engine_factory=lambda: engine, admin_token=""))
+        self.client = TestClient(create_app(self.storage, engine_factory=lambda: engine, admin_token="test-admin"))
 
     def tearDown(self):
         self.temp.cleanup()
@@ -88,8 +97,8 @@ class ApiTests(unittest.TestCase):
     def test_history_survives_restart(self):
         session_id = self.new_session()
         self.say(session_id, "Вопрос без заявки")
-        restarted = TestClient(create_app(Storage(self.db_path), engine_factory=lambda: None, admin_token=""))
-        sessions = restarted.get("/api/sessions").json()
+        restarted = TestClient(create_app(Storage(self.db_path), engine_factory=lambda: None, admin_token="test-admin"))
+        sessions = restarted.get("/api/sessions", headers=ADMIN).json()
         self.assertEqual(sessions[0]["id"], session_id)
         self.assertFalse(sessions[0]["has_lead"])
         self.assertEqual(sessions[0]["title"], "Вопрос без заявки")
@@ -114,7 +123,10 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(draft["phone"], "+79001234567")
         self.assertEqual(draft["company"], "Ромашка")
         self.assertEqual(draft["missing"], ["full_name"])
-        self.assertEqual(draft["summary"], "Клиенту нужна солнечная станция на складе.")
+        self.assertTrue(draft["summary"].startswith("Запрос клиента: Нужна станция на складе"))
+        self.assertNotIn("123-45-67", draft["summary"])
+        # До согласия история не уходит в модель, черновик собирается без неё.
+        self.assertEqual(len(self.llm.calls), 1)
         self.assertIn("ФИО", draft["message"])
 
     def test_lead_submit_flow(self):
@@ -126,11 +138,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(lead["phone"], "+79001234567")
         self.assertEqual(lead["full_name"], "Тестов Тест")
         self.assertEqual(lead["summary"], "Клиенту нужна солнечная станция на складе.")
-        leads = self.client.get("/api/leads").json()
+        leads = self.client.get("/api/leads", headers=ADMIN).json()
         self.assertEqual([item["id"] for item in leads], [lead["id"]])
         messages = self.client.get(f"/api/sessions/{session_id}").json()["messages"]
         self.assertEqual(messages[-1]["content"], LEAD_SAVED_MESSAGE)
-        self.assertTrue(self.client.get("/api/sessions").json()[0]["has_lead"])
+        self.assertTrue(self.client.get("/api/sessions", headers=ADMIN).json()[0]["has_lead"])
 
     def test_lead_requires_consent_and_valid_fields(self):
         session_id = self.new_session()
@@ -139,7 +151,7 @@ class ApiTests(unittest.TestCase):
         response = self.client.post(f"/api/sessions/{session_id}/lead", json={**LEAD, "phone": "123"})
         self.assertEqual(response.status_code, 422)
         self.assertIn("phone", response.json()["detail"]["draft"]["errors"])
-        self.assertEqual(self.client.get("/api/leads").json(), [])
+        self.assertEqual(self.client.get("/api/leads", headers=ADMIN).json(), [])
 
     def test_handoff_uses_last_question(self):
         session_id = self.new_session()
@@ -147,7 +159,7 @@ class ApiTests(unittest.TestCase):
         response = self.client.post(f"/api/sessions/{session_id}/handoff", json={})
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.json()["question"], "Как настроить конкретный счётчик?")
-        self.assertEqual(len(self.client.get("/api/handoffs").json()), 1)
+        self.assertEqual(len(self.client.get("/api/handoffs", headers=ADMIN).json()), 1)
         empty = self.new_session()
         self.assertEqual(self.client.post(f"/api/sessions/{empty}/handoff", json={}).status_code, 422)
 
@@ -157,6 +169,13 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.client.delete(f"/api/sessions/{session_id}").status_code, 204)
         self.assertEqual(self.client.get(f"/api/sessions/{session_id}").status_code, 404)
         self.assertEqual(self.client.delete(f"/api/sessions/{session_id}").status_code, 404)
+
+    def test_admin_routes_closed_without_token(self):
+        client = TestClient(create_app(self.storage, engine_factory=lambda: None, admin_token=""))
+        for path in ("/api/sessions", "/api/leads", "/api/handoffs"):
+            self.assertEqual(client.get(path).status_code, 403, path)
+            self.assertEqual(client.get(path, headers={"X-Admin-Token": ""}).status_code, 403, path)
+        self.assertEqual(client.post("/api/sessions").status_code, 201)
 
     def test_admin_token_protects_lists(self):
         client = TestClient(create_app(self.storage, engine_factory=lambda: None, admin_token="secret"))
@@ -169,7 +188,7 @@ class ApiTests(unittest.TestCase):
         def broken():
             raise RuntimeError("LLM_API_KEY=secret")
 
-        client = TestClient(create_app(self.storage, engine_factory=broken, admin_token=""))
+        client = TestClient(create_app(self.storage, engine_factory=broken, admin_token="test-admin"))
         self.assertEqual(client.get("/api/health").json()["engine"], "not_configured")
         session_id = client.post("/api/sessions").json()["id"]
         response = client.post(f"/api/sessions/{session_id}/messages", json={"text": "Вопрос"})
@@ -177,6 +196,44 @@ class ApiTests(unittest.TestCase):
         self.assertNotIn("secret", response.text)
         response = client.post(f"/api/sessions/{session_id}/lead", json=LEAD)
         self.assertEqual(response.status_code, 201)
+
+    def test_consent_boundary_for_model(self):
+        session_id = self.new_session()
+        self.say(session_id, "Я Тестов Тест, телефон 8 900 123-45-67, нужна станция")
+        calls_after_chat = len(self.llm.calls)
+        self.client.post(f"/api/sessions/{session_id}/lead/draft", json={})
+        self.client.post(f"/api/sessions/{session_id}/lead", json={**LEAD, "consent": False})
+        self.assertEqual(len(self.llm.calls), calls_after_chat)
+        response = self.client.post(f"/api/sessions/{session_id}/lead", json={**LEAD, "summary": ""})
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(len(self.llm.calls), calls_after_chat + 1)
+        self.assertTrue(self.llm.calls[-1][0]["content"].startswith("Ты помогаешь менеджеру"))
+
+    def test_client_summary_is_masked(self):
+        session_id = self.new_session()
+        self.say(session_id, "Нужна станция")
+        body = {**LEAD, "summary": "Тестов Тест, звонить 8 900 123-45-67, нужна станция"}
+        lead = self.client.post(f"/api/sessions/{session_id}/lead", json=body).json()
+        self.assertNotIn("Тестов", lead["summary"])
+        self.assertNotIn("123-45-67", lead["summary"])
+        self.assertIn("нужна станция", lead["summary"])
+
+    def test_lookup_returns_only_requested_sessions(self):
+        mine = self.new_session()
+        other = self.new_session()
+        self.say(mine, "Мой вопрос")
+        self.say(other, "Чужой вопрос")
+        found = self.client.post("/api/sessions/lookup", json={"ids": [mine, "нет-такой"]}).json()
+        self.assertEqual([s["id"] for s in found], [mine])
+        self.assertEqual(found[0]["title"], "Мой вопрос")
+        self.assertEqual(self.client.post("/api/sessions/lookup", json={"ids": []}).json(), [])
+        too_many = self.client.post("/api/sessions/lookup", json={"ids": [mine] * 51})
+        self.assertEqual(too_many.status_code, 422)
+
+    def test_web_engine_collects_contacts(self):
+        with mock.patch.object(backend_app, "build_default_engine") as build:
+            backend_app.build_web_engine()
+        build.assert_called_once_with(collect_contacts=True)
 
     def test_retention_purges_old_sessions(self):
         old = self.new_session()
