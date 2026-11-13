@@ -5,13 +5,29 @@ from __future__ import annotations
 import csv
 import importlib
 import os
+import queue
+import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 from consultant_contracts import ConsultantRequest, ConsultantResponse
 
+START_TIME = time.monotonic()
 MAX_ANSWER_CHARS = 10_000
+DEFAULT_MAX_WORKERS = 4
+MAX_WORKERS_LIMIT = 32
+# Платформа даёт 20 минут на запуск. Оставляем запас на загрузку и запись CSV.
+DEFAULT_TIME_BUDGET_SECONDS = 17 * 60
+TIMEOUT_ANSWER = (
+    "Чтобы ответить точно, нам нужно чуть больше сведений о вашем объекте и задаче. "
+    "Опишите, пожалуйста, ситуацию подробнее или оставьте заявку, и специалист "
+    "МТС EnergyTool свяжется с вами."
+)
+# Тот же нейтральный ответ при сбое движка на отдельном вопросе.
+FALLBACK_ANSWER = TIMEOUT_ANSWER
 ROLE_LABELS = {"пользователь": "user", "ассистент": "assistant"}
 
 
@@ -115,36 +131,93 @@ def write_submission(path: Path, rows: Iterable[tuple[str, str]]) -> None:
             os.unlink(temp_name)
 
 
+Outcome = tuple[Optional[ConsultantResponse], Optional[BaseException]]
+
+
+def _consult_all(
+    requests: list[ConsultantRequest],
+    consult: Callable[[ConsultantRequest], ConsultantResponse],
+    max_workers: int,
+    deadline: Optional[float],
+) -> list[Optional[Outcome]]:
+    """Обрабатывает вопросы в нескольких потоках с сохранением порядка.
+
+    Для вопросов, не успевших получить ответ до deadline, возвращается None.
+    Потоки служебные (daemon), поэтому зависший запрос не задержит выход
+    процесса после записи submission.csv.
+    """
+    outcomes: list[Optional[Outcome]] = [None] * len(requests)
+    if not requests:
+        return outcomes
+    pending: queue.Queue = queue.Queue()
+    for index in range(len(requests)):
+        pending.put(index)
+    lock = threading.Lock()
+    finished = threading.Event()
+    remaining = [len(requests)]
+
+    def worker() -> None:
+        while deadline is None or time.monotonic() < deadline:
+            try:
+                index = pending.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                outcome: Outcome = (consult(requests[index]), None)
+            except Exception as exc:
+                outcome = (None, exc)
+            with lock:
+                outcomes[index] = outcome
+                remaining[0] -= 1
+                if remaining[0] == 0:
+                    finished.set()
+
+    for _ in range(max(1, min(max_workers, len(requests)))):
+        threading.Thread(target=worker, daemon=True).start()
+    finished.wait(None if deadline is None else max(0.0, deadline - time.monotonic()))
+    with lock:
+        return list(outcomes)
+
+
 def run_adapter(
     questions_path: Path,
     output_path: Path,
     consult: Callable[[ConsultantRequest], ConsultantResponse],
+    max_workers: int = 1,
+    deadline: Optional[float] = None,
 ) -> int:
+    """deadline задаётся в единицах time.monotonic()."""
     questions = read_questions(questions_path)
+    requests = [parse_question(raw_question) for _, raw_question in questions]
+    outcomes = _consult_all(requests, consult, max_workers, deadline)
     results: list[tuple[str, str]] = []
-    for row_number, (item_id, raw_question) in enumerate(questions, start=2):
-        request = parse_question(raw_question)
-        try:
-            response = consult(request)
-        except Exception as exc:
-            # Не печатаем текст исключения: сторонние клиенты могут включить
-            # в него URL, заголовки или фрагмент запроса.
-            raise ConsultantIntegrationError(
-                f"Consultant Engine завершился ошибкой для строки {row_number} "
-                f"({type(exc).__name__})"
-            ) from None
-        if not isinstance(response, ConsultantResponse):
-            raise ConsultantIntegrationError("Engine должен вернуть ConsultantResponse")
-        answer = response.answer.strip() if isinstance(response.answer, str) else ""
-        if not answer:
-            raise ConsultantIntegrationError(f"Engine вернул пустой ответ для строки {row_number}")
-        if len(answer) > MAX_ANSWER_CHARS:
-            raise ConsultantIntegrationError(
-                f"Ответ для строки {row_number} превышает лимит {MAX_ANSWER_CHARS} символов"
-            )
+    for row_number, ((item_id, _), outcome) in enumerate(zip(questions, outcomes), start=2):
+        answer, problem = _answer_from_outcome(outcome)
+        if problem:
+            # Один сбой не должен оставить весь запуск без submission.csv.
+            # Печатаем только номер строки и тип проблемы, без текста исключения,
+            # в нём могут оказаться URL, заголовки или фрагмент запроса.
+            print(f"Строка {row_number}: {problem}, записан запасной ответ", file=sys.stderr)
         results.append((item_id, answer))
     write_submission(output_path, results)
     return len(results)
+
+
+def _answer_from_outcome(outcome: Optional[Outcome]) -> tuple[str, str]:
+    """Возвращает ответ для CSV и описание проблемы, если ответ запасной."""
+    if outcome is None:
+        return TIMEOUT_ANSWER, "не успели до конца бюджета времени"
+    response, error = outcome
+    if error is not None:
+        return FALLBACK_ANSWER, f"ошибка Consultant Engine ({type(error).__name__})"
+    if not isinstance(response, ConsultantResponse):
+        return FALLBACK_ANSWER, "Engine вернул не ConsultantResponse"
+    answer = response.answer.strip() if isinstance(response.answer, str) else ""
+    if not answer:
+        return FALLBACK_ANSWER, "Engine вернул пустой ответ"
+    if len(answer) > MAX_ANSWER_CHARS:
+        return answer[:MAX_ANSWER_CHARS].rstrip(), ""
+    return answer, ""
 
 
 def _find_input(data_dir: Path, filename: str) -> Path:
@@ -172,14 +245,26 @@ def _load_engine() -> Callable[[ConsultantRequest], ConsultantResponse]:
     return consult
 
 
+def _positive_env(name: str, default: float) -> float:
+    try:
+        value = float(os.environ.get(name, ""))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
 def main() -> None:
     data_dir = Path(os.environ.get("DATA_DIR", "data"))
     questions_path = _find_input(data_dir, "questions.csv")
     # Проверяем, что платформа передала базу, но не читаем её здесь: загрузка и
     # поиск принадлежат подключённому RAG/Consultant Engine.
     _find_input(data_dir, "knowledge-base.zip")
-    count = run_adapter(questions_path, Path("submission.csv"), _load_engine())
-    print(f"Создан submission.csv: {count} ответов")
+    max_workers = min(MAX_WORKERS_LIMIT, int(_positive_env("MAX_WORKERS", DEFAULT_MAX_WORKERS)))
+    deadline = START_TIME + _positive_env("TIME_BUDGET_SECONDS", DEFAULT_TIME_BUDGET_SECONDS)
+    count = run_adapter(
+        questions_path, Path("submission.csv"), _load_engine(), max_workers=max_workers, deadline=deadline
+    )
+    print(f"Создан submission.csv: {count} ответов, потоков {max_workers}")
 
 
 if __name__ == "__main__":

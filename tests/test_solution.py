@@ -1,14 +1,19 @@
+import contextlib
 import csv
+import io
 import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from consultant_contracts import ConsultantResponse
 from llm_client import LLMAPIError, LLMClient, LLMConfigurationError
 from solution import (
-    ConsultantIntegrationError,
+    FALLBACK_ANSWER,
+    TIMEOUT_ANSWER,
     InputFormatError,
     parse_question,
     read_questions,
@@ -25,6 +30,10 @@ class AdapterTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def read_output(self):
+        with self.output_path.open(encoding="utf-8", newline="") as stream:
+            return {row["id"]: row["answer"] for row in csv.DictReader(stream)}
 
     def write_input(self, rows, header=("id", "question")):
         with self.input_path.open("w", encoding="utf-8", newline="") as stream:
@@ -72,15 +81,13 @@ class AdapterTests(unittest.TestCase):
         with self.assertRaises(csv.Error):
             read_questions(self.input_path)
 
-    def test_empty_and_overlong_engine_responses_do_not_create_submission(self):
+    def test_empty_and_overlong_engine_responses_are_replaced(self):
         self.write_input([("1", "q")])
-        for answer in ("  ", "x" * 10_001):
+        for answer, expected in (("  ", FALLBACK_ANSWER), ("x" * 10_001, "x" * 10_000)):
             with self.subTest(length=len(answer)):
-                if self.output_path.exists():
-                    self.output_path.unlink()
-                with self.assertRaises(ConsultantIntegrationError):
+                with contextlib.redirect_stderr(io.StringIO()):
                     run_adapter(self.input_path, self.output_path, lambda _: ConsultantResponse(answer))
-                self.assertFalse(self.output_path.exists())
+                self.assertEqual(self.read_output(), {"1": expected})
 
     def test_output_csv_escapes_commas_quotes_and_newlines(self):
         self.write_input([("id,\"x\"", "вопрос")])
@@ -93,18 +100,92 @@ class AdapterTests(unittest.TestCase):
             rows = list(csv.DictReader(stream))
         self.assertEqual(rows, [{"id": 'id,"x"', "answer": 'Ответ, "точный"\nв две строки'}])
 
-    def test_engine_exception_is_sanitized(self):
+    def test_engine_exception_gives_fallback_and_is_sanitized(self):
         self.write_input([("1", "q")])
-        with self.assertRaisesRegex(ConsultantIntegrationError, "RuntimeError") as error:
-            run_adapter(self.input_path, self.output_path, lambda _: (_ for _ in ()).throw(RuntimeError("secret=do-not-log")))
-        self.assertNotIn("do-not-log", str(error.exception))
-        self.assertFalse(self.output_path.exists())
+        log = io.StringIO()
+        with contextlib.redirect_stderr(log):
+            count = run_adapter(
+                self.input_path, self.output_path, lambda _: (_ for _ in ()).throw(RuntimeError("secret=do-not-log"))
+            )
+        self.assertEqual(count, 1)
+        self.assertEqual(self.read_output(), {"1": FALLBACK_ANSWER})
+        self.assertIn("RuntimeError", log.getvalue())
+        self.assertNotIn("do-not-log", log.getvalue())
+
+    def test_parallel_run_keeps_input_order(self):
+        self.write_input([(str(i), f"вопрос {i}") for i in range(12)])
+        active = []
+        peak = [0]
+        lock = threading.Lock()
+
+        def consult(request):
+            number = int(request.question.split()[-1])
+            with lock:
+                active.append(number)
+                peak[0] = max(peak[0], len(active))
+            # Ранние вопросы отвечают дольше, чтобы ответы пришли не по порядку.
+            time.sleep(0.02 * (12 - number) / 12)
+            with lock:
+                active.remove(number)
+            return ConsultantResponse(answer=f"ответ {number}")
+
+        count = run_adapter(self.input_path, self.output_path, consult, max_workers=4)
+        self.assertEqual(count, 12)
+        with self.output_path.open(encoding="utf-8", newline="") as stream:
+            output = list(csv.DictReader(stream))
+        self.assertEqual([row["id"] for row in output], [str(i) for i in range(12)])
+        self.assertEqual([row["answer"] for row in output], [f"ответ {i}" for i in range(12)])
+        self.assertGreater(peak[0], 1)
+
+    def test_deadline_fills_unfinished_answers_and_does_not_hang(self):
+        self.write_input([("fast", "быстрый"), ("slow", "медленный")])
+        release = threading.Event()
+
+        def consult(request):
+            if request.question == "медленный":
+                release.wait(5)
+            return ConsultantResponse(answer="готово")
+
+        started = time.monotonic()
+        try:
+            run_adapter(
+                self.input_path, self.output_path, consult, max_workers=2, deadline=time.monotonic() + 0.3
+            )
+        finally:
+            release.set()
+        self.assertLess(time.monotonic() - started, 2)
+        with self.output_path.open(encoding="utf-8", newline="") as stream:
+            output = {row["id"]: row["answer"] for row in csv.DictReader(stream)}
+        self.assertEqual(output["fast"], "готово")
+        self.assertEqual(output["slow"], TIMEOUT_ANSWER)
+
+    def test_one_failed_question_does_not_break_others(self):
+        self.write_input([("1", "ok"), ("2", "bad"), ("3", "ok")])
+
+        def consult(request):
+            if request.question == "bad":
+                raise RuntimeError("secret=do-not-log")
+            return ConsultantResponse(answer="ответ")
+
+        log = io.StringIO()
+        with contextlib.redirect_stderr(log):
+            run_adapter(self.input_path, self.output_path, consult, max_workers=2)
+        self.assertEqual(self.read_output(), {"1": "ответ", "2": FALLBACK_ANSWER, "3": "ответ"})
+        self.assertIn("Строка 3", log.getvalue())
+        self.assertNotIn("do-not-log", log.getvalue())
 
     def test_missing_engine_is_explicit(self):
         env = dict(os.environ)
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+        code = (
+            "import importlib, solution\n"
+            "def fail(name):\n"
+            "    raise ImportError('secret')\n"
+            "importlib.import_module = fail\n"
+            "solution._load_engine()\n"
+        )
         result = subprocess.run(
-            [sys.executable, "-c", "from solution import _load_engine; _load_engine()"],
+            [sys.executable, "-c", code],
             cwd=self.root,
             env=env,
             capture_output=True,
@@ -114,6 +195,12 @@ class AdapterTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Consultant Engine не подключён", result.stderr)
         self.assertNotIn("secret", result.stderr.lower())
+
+    def test_engine_module_is_connected(self):
+        import consultant_engine
+        from solution import _load_engine
+
+        self.assertIs(_load_engine(), consultant_engine.consult)
 
 
 class LLMClientTests(unittest.TestCase):

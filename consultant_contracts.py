@@ -6,6 +6,17 @@ from typing import Optional, Protocol
 
 @dataclass(frozen=True)
 class RetrievedChunk:
+    """Фрагмент базы знаний, найденный поиском.
+
+    source имеет вид «путь/к/файлу.md > Заголовок > Подзаголовок». Путь берётся
+    относительно корня knowledge-base.zip, заголовки идут от верхнего уровня.
+    Эта строка показывается в режиме отладки и попадает в ConsultantResponse.sources.
+
+    score может быть любой шкалы, больше значит релевантнее. Consultant Engine
+    сравнивает score только внутри одной выдачи, поэтому абсолютная шкала не важна.
+    Фрагменты без score не отсекаются.
+    """
+
     text: str
     source: str
     score: Optional[float] = None
@@ -24,6 +35,13 @@ class ConsultantResponse:
 
 
 class Retriever(Protocol):
+    """Поиск по базе знаний.
+
+    query уже собран движком из вопроса и истории (consultant_engine.build_search_query),
+    retriever его не переписывает и историю сам не разбирает. Результат отсортирован
+    по убыванию релевантности. Метод вызывается из нескольких потоков одновременно.
+    """
+
     def retrieve(self, query: str, top_k: int = 5) -> list[RetrievedChunk]: ...
 
 
