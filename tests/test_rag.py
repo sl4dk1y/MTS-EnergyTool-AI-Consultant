@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import rag_engine  # noqa: E402
 from rag_engine import (  # noqa: E402
     MAX_CHUNK_CHARS,
+    OVERLAP_CHARS,
     RagRetriever,
     chunk_knowledge_base,
     find_knowledge_base,
@@ -91,6 +92,20 @@ class ChunkingTests(unittest.TestCase):
         self.assertTrue(chunks[1][0].endswith("Раздел Б"))
         self.assertNotIn("счётчик", chunks[0][1])
         self.assertNotIn("тариф", chunks[1][1])
+
+    def test_oversized_single_line_is_split(self) -> None:
+        """Строка без переносов длиннее лимита должна резаться, а не оставаться чанком."""
+        line = "тариф" * 1000  # 5000 символов без переносов и пробелов
+        pieces = rag_engine._split_oversized(line, MAX_CHUNK_CHARS, OVERLAP_CHARS)
+        self.assertGreater(len(pieces), 1)
+        for piece in pieces:
+            self.assertLessEqual(len(piece), MAX_CHUNK_CHARS)
+        self.assertEqual("".join(pieces), line, "текст разбит с потерями или дублями")
+
+        chunks = split_markdown("# Раздел\n\n" + line, "long-line.md")
+        self.assertTrue(chunks)
+        for _, text in chunks:
+            self.assertLessEqual(len(text), MAX_CHUNK_CHARS)
 
     def test_empty_document_gives_no_chunks(self) -> None:
         self.assertEqual(split_markdown("   \n\n", "empty.md"), [])
@@ -194,6 +209,98 @@ class RetrievalTests(unittest.TestCase):
         for chunk in chunks:
             self.assertIsNotNone(chunk.score)
             self.assertGreater(chunk.score, 0.0, "отрицательные логиты ломают относительный отсев движка")
+
+    # -- второй аудит: реранкер, эмбеддинги, косинус ----------------------
+
+    def _baseline_order(self, query: str = "Крыша на два ската панели"):
+        return [chunk.source for chunk in self._retriever().retrieve(query, top_k=5)]
+
+    def _order_with_rerank(self, response):
+        with mock.patch.dict(os.environ, {"RERANKER_MODEL": "test-reranker"}, clear=False):
+            with mock.patch.object(rag_engine, "_post_json", side_effect=response):
+                chunks = self._retriever().retrieve("Крыша на два ската панели", top_k=5)
+        return [chunk.source for chunk in chunks]
+
+    def test_rerank_partial_response_keeps_original_order(self) -> None:
+        baseline = self._baseline_order()
+
+        def response(path, body, timeout=0, attempts=0):
+            return {"results": [{"index": 0, "relevance_score": 5.0}]}
+
+        self.assertEqual(self._order_with_rerank(response), baseline)
+
+    def test_rerank_none_score_keeps_original_order(self) -> None:
+        baseline = self._baseline_order()
+
+        def response(path, body, timeout=0, attempts=0):
+            documents = body["documents"]
+            return {
+                "results": [
+                    {"index": index, "relevance_score": None if index == 0 else 1.0}
+                    for index in range(len(documents))
+                ]
+            }
+
+        self.assertEqual(self._order_with_rerank(response), baseline)
+
+    def test_rerank_malformed_response_keeps_original_order(self) -> None:
+        baseline = self._baseline_order()
+
+        def bad_index(path, body, timeout=0, attempts=0):
+            documents = body["documents"]
+            return {"results": [{"index": len(documents) + 5, "relevance_score": 1.0} for _ in documents]}
+
+        def duplicate_index(path, body, timeout=0, attempts=0):
+            documents = body["documents"]
+            return {"results": [{"index": 0, "relevance_score": 1.0} for _ in documents]}
+
+        def non_numeric(path, body, timeout=0, attempts=0):
+            documents = body["documents"]
+            return {"results": [{"index": index, "relevance_score": "высоко"} for index in range(len(documents))]}
+
+        for response in (bad_index, duplicate_index, non_numeric):
+            self.assertEqual(self._order_with_rerank(response), baseline)
+
+    def _order_with_embeddings(self, response, query: str = "Крыша на два ската"):
+        environment = {"EMB_MODEL": "test-embed", "LLM_BASE_URL": "http://proxy.local"}
+        with mock.patch.dict(os.environ, environment, clear=False):
+            with mock.patch.object(rag_engine, "_post_json", side_effect=response):
+                retriever = RagRetriever(self.kb_root, use_dense=True)
+                chunks = retriever.retrieve(query, top_k=5)
+        return retriever, [chunk.source for chunk in chunks]
+
+    def test_embeddings_dimension_mismatch_disables_dense(self) -> None:
+        def response(path, body, timeout=0, attempts=0):
+            inputs = body.get("input", [])
+            return {
+                "data": [
+                    {"index": index, "embedding": [0.1, 0.2] if index == 0 else [0.1, 0.2, 0.3]}
+                    for index in range(len(inputs))
+                ]
+            }
+
+        retriever, order = self._order_with_embeddings(response)
+        self.assertIsNone(retriever._dense, "плотный канал должен отключиться")
+        self.assertEqual(order, self._baseline_order("Крыша на два ската"))
+
+    def test_embeddings_non_finite_values_disables_dense(self) -> None:
+        def response(path, body, timeout=0, attempts=0):
+            inputs = body.get("input", [])
+            return {
+                "data": [
+                    {"index": index, "embedding": [0.1, float("nan")] if index == 0 else [0.1, 0.2]}
+                    for index in range(len(inputs))
+                ]
+            }
+
+        retriever, order = self._order_with_embeddings(response)
+        self.assertIsNone(retriever._dense, "плотный канал должен отключиться")
+        self.assertEqual(order, self._baseline_order("Крыша на два ската"))
+
+    def test_cosine_similarity_rejects_different_lengths(self) -> None:
+        self.assertIsNone(rag_engine._cosine_similarity([1.0, 2.0], [1.0]))
+        self.assertIsNone(rag_engine._cosine_similarity([], [1.0]))
+        self.assertIsNotNone(rag_engine._cosine_similarity([1.0, 0.0], [1.0, 0.0]))
 
     def test_thread_safety_builds_index_once(self) -> None:
         calls = []

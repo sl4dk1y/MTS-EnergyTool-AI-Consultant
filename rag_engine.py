@@ -42,9 +42,11 @@ DEFAULT_TOP_K = 5
 CANDIDATES_PER_CHANNEL = 20
 # Сколько кандидатов отдаём реранкеру.
 RERANK_CANDIDATES = 15
-# Веса каналов при объединении нормированных скоров. Движок режет фрагменты
-# слабее половины лучшего, поэтому скоры должны быть сопоставимы по шкале:
-# RRF даёт почти одинаковые значения и отсев не срабатывает.
+# Веса каналов при объединении нормированных скоров. Consultant Engine может
+# отсекать фрагменты относительно лучшего (RELATIVE_SCORE_CUTOFF, по умолчанию
+# 0.0 — отсечение выключено), поэтому скоры должны быть положительными и
+# сопоставимыми по шкале: RRF даёт почти одинаковые значения и для отсева
+# бесполезен.
 LEXICAL_WEIGHT = 0.6
 DENSE_WEIGHT = 0.4
 # Минимальное косинусное сходство, при котором фрагмент векторного канала
@@ -113,6 +115,26 @@ def _tokenize(text: str) -> List[str]:
     return tokens
 
 
+def _hard_split(text: str, max_chars: int) -> List[str]:
+    """Режет строку, которая не влезает в лимит даже как один абзац.
+
+    Строка без переносов и пробелов (длинная таблица, base64-подобный блок)
+    иначе осталась бы одним чанком сверх лимита. Режем по границе лимита,
+    стараясь попасть на пробел, но не теряя ни одного символа.
+    """
+    pieces: List[str] = []
+    remaining = text
+    while len(remaining) > max_chars:
+        cut = remaining.rfind(" ", 0, max_chars + 1)
+        if cut < max_chars // 2:
+            cut = max_chars
+        pieces.append(remaining[:cut])
+        remaining = remaining[cut:]
+    if remaining:
+        pieces.append(remaining)
+    return pieces
+
+
 def _split_oversized(text: str, max_chars: int, overlap_chars: int) -> List[str]:
     """Дробит длинный блок по абзацам, не разрывая таблицы и списки."""
     paragraphs = [part for part in _SPLIT_PARAGRAPHS_RE.split(text) if part.strip()]
@@ -147,7 +169,14 @@ def _split_oversized(text: str, max_chars: int, overlap_chars: int) -> List[str]
             current = [tail] if tail else []
         current.append(paragraph)
     flush()
-    return [piece for piece in pieces if piece.strip()]
+
+    # Последняя страховка: любая строка, которая всё ещё длиннее лимита,
+    # режется жёстко. Без неё чанк мог превысить MAX_CHUNK_CHARS.
+    result: List[str] = []
+    for piece in pieces:
+        if piece.strip():
+            result.extend(_hard_split(piece, max_chars))
+    return result
 
 
 def split_markdown(text: str, source_prefix: str) -> List[Tuple[str, str]]:
@@ -286,6 +315,21 @@ class _BM25:
 # --------------------------------------------------------------------------
 
 
+def _cosine_similarity(left: Sequence[float], right: Sequence[float]) -> Optional[float]:
+    """Косинус двух векторов. None, если сравнение бессмысленно.
+
+    Векторы разной длины молча дают неверный результат при ``zip``, поэтому
+    такая пара не сравнивается вовсе.
+    """
+    if not left or len(left) != len(right):
+        return None
+    left_norm = math.sqrt(sum(value * value for value in left))
+    right_norm = math.sqrt(sum(value * value for value in right))
+    if left_norm == 0 or right_norm == 0:
+        return None
+    return sum(a * b for a, b in zip(left, right)) / (left_norm * right_norm)
+
+
 class _DenseIndex:
     """Косинусный поиск по нормализованным векторам."""
 
@@ -307,17 +351,19 @@ class _DenseIndex:
     def search(self, vector: Sequence[float], limit: int) -> List[Tuple[int, float]]:
         if not self._vectors:
             return []
-        norm = math.sqrt(sum(value * value for value in vector)) or 1.0
-        query = [value / norm for value in vector]
         if self._matrix is not None:
-            scores = self._matrix.dot(_np.asarray(query, dtype="float32"))
+            if len(vector) != self._matrix.shape[1]:
+                _log("векторный канал: размерность запроса не совпадает с индексом")
+                return []
+            scores = self._matrix.dot(_np.asarray(vector, dtype="float32"))
             order = _np.argsort(-scores)[:limit]
             return [(int(index), float(scores[index])) for index in order]
         scored: List[Tuple[int, float]] = []
         for index, candidate in enumerate(self._vectors):
-            candidate_norm = math.sqrt(sum(value * value for value in candidate)) or 1.0
-            dot = sum(a * b for a, b in zip(query, candidate)) / candidate_norm
-            scored.append((index, dot))
+            similarity = _cosine_similarity(vector, candidate)
+            if similarity is None:
+                continue
+            scored.append((index, similarity))
         scored.sort(key=lambda item: item[1], reverse=True)
         return scored[:limit]
 
@@ -360,6 +406,29 @@ def _post_json(path: str, payload: dict, timeout: float, attempts: int = 3) -> d
     raise RuntimeError(f"запрос {path} не удался: {type(last_error).__name__}")
 
 
+def _validate_vectors(vectors: Sequence[Sequence[float]]) -> int:
+    """Проверяет размерность и конечность значений. Возвращает dim или 0."""
+    if not vectors:
+        _log("эмбеддинги: пустой ответ")
+        return 0
+    dimension = len(vectors[0])
+    if dimension <= 0:
+        _log("эмбеддинги: нулевая размерность")
+        return 0
+    for vector in vectors:
+        if len(vector) != dimension:
+            _log("эмбеддинги: векторы разной длины, плотный канал отключён")
+            return 0
+        for value in vector:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                _log("эмбеддинги: нечисловое значение, плотный канал отключён")
+                return 0
+            if not math.isfinite(float(value)):
+                _log("эмбеддинги: NaN или бесконечность, плотный канал отключён")
+                return 0
+    return dimension
+
+
 def _embed_texts(texts: Sequence[str], timeout: float = 30.0) -> List[List[float]]:
     model = os.environ.get("EMB_MODEL")
     if not model:
@@ -373,11 +442,17 @@ def _embed_texts(texts: Sequence[str], timeout: float = 30.0) -> List[List[float
             raise RuntimeError("прокси вернул неверное число векторов")
         ordered = sorted(data, key=lambda item: item.get("index", 0))
         vectors.extend(list(item["embedding"]) for item in ordered)
+    if _validate_vectors(vectors) == 0:
+        raise RuntimeError("эмбеддинги не прошли проверку размерности или значений")
     return vectors
 
 
 def _rerank(query: str, documents: Sequence[str], timeout: float = 20.0) -> Optional[List[float]]:
-    """Скоры реранкера в порядке documents. None, если реранкер недоступен."""
+    """Скоры реранкера в порядке documents. None, если ответ невалиден.
+
+    Неполный или битый ответ отбрасывается целиком: подставлять пропущенным
+    документам нейтральный скор нельзя, иначе они обгонят реальные результаты.
+    """
     model = os.environ.get("RERANKER_MODEL")
     if not model:
         return None
@@ -392,16 +467,36 @@ def _rerank(query: str, documents: Sequence[str], timeout: float = 20.0) -> Opti
         _log(f"реранкер недоступен: {type(exc).__name__}")
         return None
     items = payload.get("results") or payload.get("data") or []
-    if not items:
+    if not isinstance(items, list) or len(items) != len(documents):
+        _log("реранкер: число результатов не совпадает с числом документов")
         return None
-    scores = [0.0] * len(documents)
-    try:
-        for position, item in enumerate(items):
-            index = int(item.get("index", position))
-            if 0 <= index < len(scores):
-                scores[index] = float(item.get("relevance_score", item.get("score", 0.0)))
-    except (TypeError, ValueError):
-        return None
+    scores: List[float] = [0.0] * len(documents)
+    seen = set()
+    for item in items:
+        if not isinstance(item, dict):
+            _log("реранкер: элемент ответа не объект")
+            return None
+        index = item.get("index")
+        if isinstance(index, bool) or not isinstance(index, int):
+            _log("реранкер: индекс не целое число")
+            return None
+        if not 0 <= index < len(documents) or index in seen:
+            _log("реранкер: индекс вне диапазона или повторяется")
+            return None
+        seen.add(index)
+        raw = item.get("relevance_score", item.get("score"))
+        if raw is None or isinstance(raw, bool):
+            _log("реранкер: отсутствует оценка")
+            return None
+        try:
+            score = float(raw)
+        except (TypeError, ValueError):
+            _log("реранкер: оценка не число")
+            return None
+        if not math.isfinite(score):
+            _log("реранкер: оценка не конечное число")
+            return None
+        scores[index] = score
     return scores
 
 
@@ -609,8 +704,8 @@ class RagRetriever:
         scores = _rerank(query, [self._chunks[index][1] for index, _ in head])
         if scores is None:
             return [(index, score) for index, score in candidates]
-        # Логиты реранкера приводятся к (0, 1), иначе относительный отсев движка
-        # (0.5 * max(score)) выбросит фрагменты с отрицательным скором.
+        # Логиты реранкера приводятся к (0, 1): движок может включить
+        # относительный отсев, а отрицательные скоры его ломают.
         rescored = [(head[position][0], _sigmoid(scores[position])) for position in range(len(head))]
         rescored.sort(key=lambda item: item[1], reverse=True)
         rescored.extend(candidates[len(head) :])
