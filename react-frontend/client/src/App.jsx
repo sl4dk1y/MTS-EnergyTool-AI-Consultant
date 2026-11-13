@@ -43,8 +43,14 @@ export default function App() {
   }, []);
 
   const loadHistory = useCallback(async () => {
+    let savedIds = [];
     try {
-      const list = await api('/api/sessions');
+      savedIds = JSON.parse(localStorage.getItem('mts-session-ids') || '[]');
+      if (!Array.isArray(savedIds)) savedIds = [];
+    } catch { savedIds = []; }
+    if (savedIds.length === 0) { setSessions([]); return; }
+    try {
+      const list = await api('/api/sessions/lookup', 'POST', { ids: savedIds.slice(0, 50) });
       setSessions(Array.isArray(list) ? list : []);
     } catch {}
   }, []);
@@ -53,6 +59,13 @@ export default function App() {
     try {
       const d = await api('/api/sessions', 'POST', {});
       setSid(d.id || '');
+      if (d.id) {
+        try {
+          const savedIds = JSON.parse(localStorage.getItem('mts-session-ids') || '[]');
+          const ids = Array.isArray(savedIds) ? savedIds : [];
+          if (!ids.includes(d.id)) localStorage.setItem('mts-session-ids', JSON.stringify([...ids, d.id].slice(-50)));
+        } catch {}
+      }
     } catch { setSid(''); }
     setMsgs([{ role: 'assistant', content: GREETING }]);
     setDebugText('Отладка: создан новый диалог.');

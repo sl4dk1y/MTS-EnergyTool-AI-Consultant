@@ -31,7 +31,7 @@ export default function LeadModal({ open, draft, onClose, onSubmit }) {
         {error ? <p style={{ margin: 0, color: 'var(--red)', fontSize: 13 }}>{error}</p> : null}
         <label>ФИО<input name="full_name" type="text" required autoComplete="name" value={fullName} onChange={(e) => setFullName(e.target.value)} /></label>
         <label>Телефон<input name="phone" type="tel" required autoComplete="tel" value={phone} onChange={(e) => setPhone(e.target.value)} /></label>
-        <label>Компания<input name="company" type="text" autoComplete="organization" value={company} onChange={(e) => setCompany(e.target.value)} /></label>
+        <label>Компания<input name="company" type="text" required autoComplete="organization" value={company} onChange={(e) => setCompany(e.target.value)} /></label>
         <label className="check"><input type="checkbox" name="consent" required style={{ marginTop: 3 }} checked={consent} onChange={(e) => setConsent(e.target.checked)} />Согласен на обработку персональных данных</label>
         <button className="btn primary" type="submit">Отправить заявку</button>
         <button className="btn" type="button" onClick={onClose}>Отмена</button>
