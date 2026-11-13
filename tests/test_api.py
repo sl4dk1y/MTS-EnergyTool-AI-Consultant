@@ -70,8 +70,9 @@ class ApiTests(unittest.TestCase):
         self.assertIsInstance(first["assistant_message"]["elapsed_ms"], int)
         self.say(session_id, "А на фасад можно?")
         sent = self.llm.calls[-1]
-        self.assertEqual([m["role"] for m in sent[2:]], ["user", "assistant", "user"])
-        self.assertEqual(sent[2]["content"], "Хотим солнечную станцию")
+        self.assertEqual([m["role"] for m in sent], ["system", "user", "assistant", "user"])
+        self.assertEqual(sent[1]["content"], "Хотим солнечную станцию")
+        self.assertIn("Вопрос клиента:\nА на фасад можно?", sent[-1]["content"])
         messages = self.client.get(f"/api/sessions/{session_id}").json()["messages"]
         self.assertEqual([m["role"] for m in messages], ["user", "assistant", "user", "assistant"])
 
