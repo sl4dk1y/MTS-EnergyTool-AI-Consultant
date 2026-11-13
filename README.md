@@ -65,3 +65,7 @@ python -m unittest discover -s tests -v
 [Архитектура](docs/ARCHITECTURE.md) · [Требования](docs/REQUIREMENTS.md) · [Конкурсный регламент](docs/COMPETITION.md) · [Consultant Engine](docs/ENGINE.md)
 
 Правила работы команды — в [CONTRIBUTING.md](CONTRIBUTING.md), защита данных — в [SECURITY.md](SECURITY.md), участники — в [CONTRIBUTORS.md](CONTRIBUTORS.md). Не добавляйте в публичный Git закрытые материалы организаторов, ключи, персональные данные и производные индексы.
+
+## Лицензия
+
+Собственный исходный код проекта распространяется по Apache License 2.0; полный текст приведён в [LICENSE](LICENSE). Уведомления об авторстве и сторонних материалах находятся в [NOTICE](NOTICE). Лицензия проекта не заменяет условия использования сторонних компонентов и материалов организаторов.
