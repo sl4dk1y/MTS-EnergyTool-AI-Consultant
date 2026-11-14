@@ -1,6 +1,6 @@
 # MTS EnergyTool AI Consultant
 
-AI-консультант для B2B-клиентов EnergyTool по кейсу МТС на [Changellenge >> Hack&Change 2026](https://changellenge.com/championships/khakaton-hack-change-2026/). Проект команды «Рено Логан 2007» готовит ответы по предоставленной базе знаний и учитывает историю короткого диалога.
+Веб- и конкурсный прототип консультанта EnergyTool. Конкурсный запуск читает вопросы из `questions.csv` и записывает ответы в `submission.csv`. Веб-прототип использует тот же Consultant Engine, FastAPI, SQLite и React-клиент.
 
 ## Архитектура
 
@@ -8,64 +8,87 @@ AI-консультант для B2B-клиентов EnergyTool по кейсу
 flowchart LR
     CSV[questions.csv] --> Adapter[solution.py]
     Adapter --> Engine[Consultant Engine]
-    Engine --> Search[Временный BM25: kb_search.py]
-    Search --> KB[knowledge-base.zip]
-    Engine --> LLM[LLM API: chat/completions]
+    Web[React + Vite] --> API[FastAPI]
+    API --> Engine
+    Engine --> RAG[RAG: rag_engine.py]
+    RAG --> KB[Локальная разрешённая база знаний]
+    Engine --> LLM[OpenAI-совместимый API]
+    RAG -. при настройке .-> Vector[Embeddings и reranking API]
     Engine --> Adapter
     Adapter --> Output[submission.csv]
-    Web[Веб-адаптер: планируется] -.-> Engine
+    API --> DB[(SQLite)]
 ```
 
-Реализованы конкурсный CSV-адаптер, общий Consultant Engine, клиент LLM API и временный поиск BM25 по Markdown и текстовым файлам. Движок отделяет найденные документы от системных инструкций и возвращает безопасный ответ при отсутствии контекста или ошибке. Адаптер сохраняет порядок ID и обрабатывает отдельные сбои без остановки остальных вопросов.
+`solution.py` остаётся независимым от веб-сервера. `ConsultantEngine` выбирает основной retriever из `rag_engine.py`; временный BM25 доступен для локального сравнения и fallback. В веб-режиме React обращается к FastAPI через прокси Vite. Без настроенного LLM API сервер запускается, но запросы консультанту вернут ошибку настройки.
 
-Основной RAG находится на ревью в [PR #54](https://github.com/sl4dk1y/MTS-EnergyTool-AI-Consultant/pull/54); в текущей `main` применяется временный BM25. Веб-интерфейс, backend, сбор заявок и интеграция с сайтом находятся в разработке. Docker-запуск, реальный API и полный конкурсный запуск пока не подтверждены.
+## Быстрый запуск веб-прототипа
 
-## Структура
+Нужны Python 3.11+, Node.js и npm. Команды выполняются из корня репозитория, кроме команд клиента.
 
-```text
-.
-├── solution.py              # конкурсный адаптер
-├── consultant_engine.py     # движок консультации
-├── consultant_contracts.py  # внутренние контракты
-├── kb_search.py             # временный BM25
-├── llm_client.py            # клиент LLM API
-├── requirements.txt         # текущий адаптер без внешних зависимостей
-├── tests/                   # unit-тесты
-├── tools/                   # локальная оценка поиска
-├── docs/                    # документация проекта
-└── .github/workflows/        # CI
-```
+Поместите разрешённый `knowledge-base.zip` в игнорируемый Git каталог `local-data/` и задайте `DATA_DIR=local-data`. Для ответов настройте `LLM_BASE_URL`, `LLM_API_KEY` и `LLM_MODEL` локально в окружении backend. Для плотного поиска RAG дополнительно поддерживает `EMB_MODEL`; reranker настраивается через `RERANKER_MODEL`. Подробности — в [документации RAG](docs/RAG.md) и [документации движка](docs/ENGINE.md). Не сохраняйте секреты в репозитории.
 
-## Локальный запуск
-
-Нужны Python 3.9 или 3.11, разрешённая локальная база `knowledge-base.zip`, входной `questions.csv` и доступ к предусмотренному API модели. Базу и входной файл поместите в каталог `data/` или укажите его через `DATA_DIR`. Ключ храните только в окружении. Пример для оболочки Unix:
+Терминал 1 — установить backend-зависимости и запустить FastAPI:
 
 ```bash
-export DATA_DIR="data"
-export LLM_BASE_URL="<адрес API>"
-export LLM_API_KEY="<ключ API>"
-export LLM_MODEL="<идентификатор модели>"
-python solution.py
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r backend/requirements.txt
+export DATA_DIR=local-data
+uvicorn backend.app:app --port 8000
 ```
 
-Вместо `LLM_BASE_URL` и `LLM_API_KEY` поддерживаются `OPENAI_BASE_URL` и `OPENAI_API_KEY`; модель также может задаваться через `OPENAI_MODEL` или `GEN_MODEL`. `RETRIEVER=bm25` принудительно выбирает временный поиск. Остальные параметры описаны в [документации движка](docs/ENGINE.md). Не запускайте реальные запросы без разрешения и действующей конфигурации организаторов.
+Терминал 2 — собрать React-клиент:
 
-`questions.csv` содержит заголовки `id,question`; поле вопроса может включать многострочную историю диалога. Скрипт создаёт `submission.csv` в текущем рабочем каталоге с колонками `id,answer`, сохраняя порядок идентификаторов. CSV поддерживает кавычки, запятые и переносы строк. Ответ ограничен 10 000 символами.
+```bash
+cd react-frontend/client
+npm ci
+npm run dev
+```
 
-## Проверка
+Откройте `http://localhost:5173`. Vite проксирует `/api` на `http://localhost:8000`. API-маршруты, согласие на обработку данных и локальный сценарий описаны в [docs/API.md](docs/API.md). Используйте только вымышленные данные для проверки формы заявки.
+
+## Запуск через Docker Compose
+
+Установите Docker с Compose, скопируйте `.env.example` в локальный `.env`, заполните настройки разрешённого LLM API и положите разрешённую базу в `local-data/knowledge-base.zip`. Затем выполните из корня:
+
+```bash
+docker compose up --build
+```
+
+Откройте `http://localhost:4173`. Compose подключает `local-data/` к поиску только для чтения, а SQLite хранит в этом же локальном каталоге. Docker build не включает базы, `.env`, локальные настройки или агентные файлы. Остановить сервисы можно командой `docker compose down`.
+
+## Конкурсный запуск
+
+Конкурсный адаптер запускается отдельно от backend и frontend. Поместите предоставленную и разрешённую к использованию базу `knowledge-base.zip` и входной `questions.csv` в локальный `local-data/` либо укажите каталог через `DATA_DIR`. Настройте `LLM_BASE_URL`, `LLM_API_KEY` и `LLM_MODEL` в окружении, затем выполните из корня:
+
+```bash
+DATA_DIR=local-data python solution.py
+```
+
+Входной CSV содержит `id,question`; выходной — `id,answer`. Порядок идентификаторов сохраняется. Поддерживаются переменные `OPENAI_BASE_URL`, `OPENAI_API_KEY` и `OPENAI_MODEL` как совместимые альтернативы. `RETRIEVER=bm25` принудительно включает временный BM25. Условия упаковки и запуска определяются [регламентом](docs/COMPETITION.md); не включайте локальные данные и секреты в Git или конкурсный архив.
+
+## Проверки
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-Тесты используют синтетические данные и подменяют сетевые вызовы. Наличие проходящих unit-тестов не подтверждает работу платформы или качество ответов реальной модели.
+Frontend:
+
+```bash
+cd react-frontend/client
+npm ci
+npm run build
+```
+
+Тесты используют синтетические данные и заглушки API. Они не подтверждают работу реального API организаторов или качество ответов на конкурсных материалах.
 
 ## Документация и участие
 
-[Архитектура](docs/ARCHITECTURE.md) · [Требования](docs/REQUIREMENTS.md) · [Конкурсный регламент](docs/COMPETITION.md) · [Consultant Engine](docs/ENGINE.md)
+[Архитектура](docs/ARCHITECTURE.md) · [Требования](docs/REQUIREMENTS.md) · [Конкурсный регламент](docs/COMPETITION.md) · [Consultant Engine](docs/ENGINE.md) · [RAG](docs/RAG.md) · [Backend API](docs/API.md)
 
-Правила работы команды — в [CONTRIBUTING.md](CONTRIBUTING.md), защита данных — в [SECURITY.md](SECURITY.md), участники — в [CONTRIBUTORS.md](CONTRIBUTORS.md). Не добавляйте в публичный Git закрытые материалы организаторов, ключи, персональные данные и производные индексы.
+Правила работы команды — в [CONTRIBUTING.md](CONTRIBUTING.md), защита данных — в [SECURITY.md](SECURITY.md), сведения об участниках — в [CONTRIBUTORS.md](CONTRIBUTORS.md). В публичный Git не добавляйте исходные материалы организаторов, базы знаний, их производные индексы, закрытые тестовые данные, секреты или реальные персональные данные.
 
 ## Лицензия
 
-Собственный исходный код проекта распространяется по Apache License 2.0; полный текст приведён в [LICENSE](LICENSE). Уведомления об авторстве и сторонних материалах находятся в [NOTICE](NOTICE). Лицензия проекта не заменяет условия использования сторонних компонентов и материалов организаторов.
+Собственный исходный код проекта распространяется по Apache License 2.0; текст указан в [LICENSE](LICENSE). Уведомления о лицензировании сторонних материалов приведены в [NOTICE](NOTICE). Лицензия проекта не меняет условия использования материалов организаторов и зависимостей.
