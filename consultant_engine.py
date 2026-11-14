@@ -186,6 +186,11 @@ class ConsultantEngine:
         # collect_contacts включает правило о заявке, нужно только веб-прототипу.
         self._system_prompt = SYSTEM_PROMPT + (WEB_CONTACT_RULE if collect_contacts else "")
 
+    @property
+    def llm(self) -> ChatModel:
+        """Та же модель нужна backend для резюме заявки."""
+        return self._llm
+
     def retrieve(self, request: ConsultantRequest) -> list[RetrievedChunk]:
         if self._retriever is None:
             return []
