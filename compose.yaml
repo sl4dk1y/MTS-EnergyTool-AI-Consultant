@@ -1,0 +1,31 @@
+services:
+  backend:
+    build:
+      context: .
+      target: backend
+    environment:
+      DATA_DIR: /local-kb
+      DATABASE_PATH: /app/local-data/web.sqlite3
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      EMB_MODEL: ${EMB_MODEL:-}
+      RERANKER_MODEL: ${RERANKER_MODEL:-}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      CORS_ORIGINS: http://localhost:4173
+    volumes:
+      - ./local-data:/local-kb:ro
+      - ./local-data:/app/local-data
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  frontend:
+    build:
+      context: .
+      target: frontend
+    environment:
+      VITE_API_PROXY_TARGET: http://backend:8000
+    depends_on:
+      - backend
+    ports:
+      - "127.0.0.1:4173:4173"
