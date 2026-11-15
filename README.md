@@ -49,13 +49,13 @@ npm run dev
 
 ## Запуск через Docker Compose
 
-Установите Docker с Compose, скопируйте `.env.example` в локальный `.env`, заполните настройки разрешённого LLM API и положите разрешённую базу в `local-data/knowledge-base.zip`. Затем выполните из корня:
+Установите Docker с Compose, скопируйте `.env.example` в локальный `.env` и заполните настройки разрешённого LLM API. По умолчанию Compose подключает каталог `Данные/knowledge-base/` к backend только для чтения. Чтобы переключить веб-прототип на данные из `local-data/`, задайте в `.env` `KB_DATA_DIR=/local-kb`. Веб-сценарий обрабатывает сообщения чата и не читает конкурсный `questions.csv`; этот файл отдельно читает `solution.py`.
 
 ```bash
 docker compose up --build
 ```
 
-Откройте `http://localhost:4173`. Compose подключает `local-data/` к поиску только для чтения, а SQLite хранит в этом же локальном каталоге. Docker build не включает базы, `.env`, локальные настройки или агентные файлы. Остановить сервисы можно командой `docker compose down`.
+Откройте `http://localhost:4173`. SQLite хранится в локальном каталоге `local-data/`. Docker build не включает базы, `.env` или локальные служебные файлы. Остановить сервисы можно командой `docker compose down`.
 
 ## Конкурсный запуск
 

@@ -70,7 +70,18 @@ class ApiTests(unittest.TestCase):
         return response.json()
 
     def test_health(self):
-        self.assertEqual(self.client.get("/api/health").json(), {"status": "ok", "engine": "ready"})
+        self.assertEqual(
+            self.client.get("/api/health").json(),
+            {"status": "ok", "engine": "ready", "knowledge_base": "found", "retriever": "OneChunkRetriever"},
+        )
+
+    def test_health_shows_missing_knowledge_base(self):
+        engine = ConsultantEngine(EchoLLM(), None)
+        client = TestClient(create_app(self.storage, engine_factory=lambda: engine, admin_token="test-admin"))
+        self.assertEqual(
+            client.get("/api/health").json(),
+            {"status": "degraded", "engine": "ready", "knowledge_base": "missing", "retriever": None},
+        )
 
     def test_chat_keeps_history_and_returns_debug_info(self):
         session_id = self.new_session()

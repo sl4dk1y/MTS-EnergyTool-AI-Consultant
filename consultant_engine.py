@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import threading
 from pathlib import Path
 from typing import Optional, Protocol, Sequence
@@ -187,6 +188,11 @@ class ConsultantEngine:
         self._system_prompt = SYSTEM_PROMPT + (WEB_CONTACT_RULE if collect_contacts else "")
 
     @property
+    def retriever_name(self) -> Optional[str]:
+        """Тип поиска для диагностики, None если база знаний не подключена."""
+        return type(self._retriever).__name__ if self._retriever is not None else None
+
+    @property
     def llm(self) -> ChatModel:
         """Та же модель нужна backend для резюме заявки."""
         return self._llm
@@ -261,9 +267,22 @@ def build_default_engine(collect_contacts: bool = False) -> ConsultantEngine:
     from kb_search import find_knowledge_base
     from llm_client import LLMClient
 
+    project_root = Path(__file__).resolve().parent
     data_dir = Path(os.environ.get("DATA_DIR", "data"))
-    kb_path = find_knowledge_base(data_dir, (Path(__file__).resolve().parent / data_dir, Path.cwd()))
+    # local-data это каталог из README для локального запуска и Docker.
+    search_dirs = (project_root / data_dir, Path.cwd(), project_root / "local-data")
+    kb_path = find_knowledge_base(data_dir, search_dirs)
     retriever = build_retriever(kb_path)
+    if retriever is None:
+        # Без базы движок на любой вопрос отвечает, что данных нет. Пишем об этом
+        # сразу, иначе со стороны это выглядит как поломка поиска.
+        print(
+            f"[engine] база знаний не найдена, DATA_DIR={data_dir}. Положите knowledge-base.zip "
+            "или распакованную базу в DATA_DIR, иначе ответы будут без базы",
+            file=sys.stderr,
+        )
+    else:
+        print(f"[engine] база знаний {kb_path}, поиск {type(retriever).__name__}", file=sys.stderr)
     # По умолчанию клиент ждёт 90 с и делает 3 попытки, это до 4,5 минут на
     # один зависший вопрос. Для конкурса хватит 40 с и двух попыток.
     llm = LLMClient.from_env(

@@ -26,7 +26,7 @@ DATA_DIR=local-data ADMIN_TOKEN=придумайте-токен LLM_BASE_URL=...
 cd react-frontend/client && npm install && npm run dev
 ```
 
-Команды backend выполняются из корня репозитория. В `DATA_DIR` должен лежать `knowledge-base.zip`. Без переменных LLM сервер стартует, но чат отвечает 503, а `/api/health` показывает `"engine": "not_configured"`.
+Команды backend выполняются из корня репозитория. В `DATA_DIR` должен лежать `knowledge-base.zip` или распакованная база с файлами Markdown и TXT. Без `DATA_DIR` база ищется ещё и в `local-data/`. Найдена ли она, видно в логе при старте и в `/api/health`. Без переменных LLM сервер стартует, но чат отвечает 503, а `/api/health` показывает `"engine": "not_configured"`.
 
 | Переменная | По умолчанию | Назначение |
 |---|---|---|
@@ -53,8 +53,9 @@ cd react-frontend/client && npm install && npm run dev
 
 ### `GET /api/health`
 ```json
-{"status": "ok", "engine": "ready"}
+{"status": "ok", "engine": "ready", "knowledge_base": "found", "retriever": "RagRetriever"}
 ```
+`knowledge_base: "missing"` и `status: "degraded"` значат, что движок не нашёл базу знаний и на любой вопрос ответит, что данных нет. Где он её ищет, описано в [ENGINE.md](ENGINE.md). Без настроек LLM `engine` равен `not_configured`.
 
 ### `POST /api/sessions` → 201
 ```json
