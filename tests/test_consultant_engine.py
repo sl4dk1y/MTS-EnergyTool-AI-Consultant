@@ -293,6 +293,11 @@ class ResilienceTests(unittest.TestCase):
         engine.retrieve(ConsultantRequest(question="Одиночный вопрос"))
         self.assertEqual(len(retriever.queries), 1)
 
+    def test_prompt_version_switch(self):
+        self.assertIn(consultant_engine.SYSTEM_PROMPT, (consultant_engine.SYSTEM_PROMPT_V1, consultant_engine.SYSTEM_PROMPT_V2))
+        self.assertIn("Опирайся только на сведения", consultant_engine.SYSTEM_PROMPT_V1)
+        self.assertIn("Факты, которые можно утверждать", consultant_engine.SYSTEM_PROMPT_V2)
+
 class PromptHelpersTests(unittest.TestCase):
     def test_search_query_includes_short_question_and_history(self):
         request = ConsultantRequest(
@@ -590,7 +595,11 @@ class KnowledgeBaseSearchTests(unittest.TestCase):
         with mock.patch.dict(os.environ, env, clear=False), contextlib.redirect_stderr(io.StringIO()):
             engine = consultant_engine.build_default_engine()
         self.assertIsInstance(engine._local_search, KnowledgeBaseSearch)
-        self.assertIsNotNone(engine._guide)
+        self.assertEqual(engine._guide is not None, consultant_engine.USE_GUIDE_SECTIONS)
+        with mock.patch.dict(os.environ, env, clear=False), contextlib.redirect_stderr(io.StringIO()), mock.patch.object(
+            consultant_engine, "USE_GUIDE_SECTIONS", True
+        ):
+            self.assertIsNotNone(consultant_engine.build_default_engine()._guide)
         self.assertEqual(engine.llm._timeout, 90.0)
         answer = engine.fallback_answer(ConsultantRequest(question="Старая шиферная крыша подойдёт под панели?"))
         self.assertEqual(answer, "")  # в тестовой базе разделы короче 80 символов
