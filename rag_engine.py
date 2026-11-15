@@ -569,7 +569,7 @@ def find_knowledge_base(data_dir: Optional[Path] = None) -> Optional[Path]:
 
 
 class RagRetriever:
-    """Гибридный поиск: BM25 + эмбеддинги, объединение RRF, реранкер по желанию."""
+    """Гибридный поиск: BM25 и эмбеддинги с нормированным взвешиванием и реранкером."""
 
     def __init__(
         self,

@@ -1,34 +1,31 @@
 # Общая ответственность за репозиторий
 * @sl4dk1y
 
-# Документация
+# Документация и процесс разработки
 /docs/ @sl4dk1y
 /README.md @sl4dk1y
 /CONTRIBUTING.md @sl4dk1y
 /CONTRIBUTORS.md @sl4dk1y
 /SECURITY.md @sl4dk1y
+/docs/RAG.md @sl4dk1y @CAH0
 
-# Конкурсный runtime
+# Конкурсный runtime, LLM и общий Consultant Engine
 /solution.py @sl4dk1y @kodi842
+/consultant_contracts.py @sl4dk1y @kodi842 @CAH0
+/consultant_engine.py @sl4dk1y @kodi842
+/llm_client.py @sl4dk1y @kodi842
+/leads.py @sl4dk1y @kodi842
 
-# LLM и Consultant Engine
-/src/energytool/agent/ @sl4dk1y @kodi842
-/src/energytool/dialogue/ @sl4dk1y @kodi842
-/src/energytool/leads/ @sl4dk1y @kodi842
-
-# RAG
-/src/energytool/rag/ @CAH0
-
-# Backend
+# Retrieval и база знаний
+/rag_engine.py @CAH0
+/kb_search.py @CAH0
+# Backend и frontend
 /backend/ @sl4dk1y @kodi842
+/react-frontend/ @pesocheck
 
-# Frontend
-/frontend/ @pesocheck
-
-# Тестирование
+# Проверки и сборка
 /tests/ @sl4dk1y @kodi842
-
-# Конфигурация сборки
+/tests/test_rag.py @CAH0 @sl4dk1y
 /Dockerfile @sl4dk1y
 /compose.yaml @sl4dk1y
 /.github/workflows/ @sl4dk1y
