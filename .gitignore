@@ -53,6 +53,7 @@ build/
 .docker/
 __MACOSX/
 ._*
+.backupignore
 
 # macOS и IDE
 .DS_Store
@@ -69,3 +70,8 @@ __MACOSX/
 /Данные-20261110T154038Z-1-001.zip
 /Данные*.zip
 /Данные/
+local-data/
+Данные/
+private-data/
+user-data/
+organizer-materials/
