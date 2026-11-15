@@ -26,7 +26,7 @@ DATA_DIR=local-data ADMIN_TOKEN=придумайте-токен LLM_BASE_URL=...
 cd react-frontend/client && npm install && npm run dev
 ```
 
-Команды backend выполняются из корня репозитория. В `DATA_DIR` должен лежать `knowledge-base.zip` или распакованная база. Без `DATA_DIR` база ищется ещё и в `local-data/`. Найдена ли она, видно в логе при старте и в `/api/health`. Без переменных LLM сервер стартует, но чат отвечает 503, а `/api/health` показывает `"engine": "not_configured"`.
+Команды backend выполняются из корня репозитория. В `DATA_DIR` должен лежать `knowledge-base.zip` или распакованная база с файлами Markdown и TXT. Без `DATA_DIR` база ищется ещё и в `local-data/`. Найдена ли она, видно в логе при старте и в `/api/health`. Без переменных LLM сервер стартует, но чат отвечает 503, а `/api/health` показывает `"engine": "not_configured"`.
 
 | Переменная | По умолчанию | Назначение |
 |---|---|---|

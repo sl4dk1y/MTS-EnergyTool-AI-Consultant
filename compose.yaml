@@ -4,8 +4,8 @@ services:
       context: .
       target: backend
     environment:
-      DATA_DIR: /local-kb
-      DATABASE_PATH: /app/local-data/web.sqlite3
+      DATA_DIR: ${KB_DATA_DIR:-/competition-data}
+      DATABASE_PATH: ${DATABASE_PATH:-/app/local-data/web.sqlite3}
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-}
@@ -14,6 +14,8 @@ services:
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
       CORS_ORIGINS: http://localhost:4173
     volumes:
+      # Для синтетического smoke-теста задайте KB_DATA_DIR=/local-kb.
+      - ./Данные/knowledge-base:/competition-data/knowledge-base:ro
       - ./local-data:/local-kb:ro
       - ./local-data:/app/local-data
     ports:
