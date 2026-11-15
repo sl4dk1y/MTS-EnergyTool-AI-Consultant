@@ -18,9 +18,9 @@ from leads import (
 
 # Только выдуманные данные.
 HISTORY = [
-    {"role": "user", "content": "Хотим поставить солнечную станцию на складе в Казани."},
-    {"role": "assistant", "content": "Какая площадь кровли? Мой номер для справок +7 999 111-11-11."},
-    {"role": "user", "content": "Около 800 м². Оставлю заявку: Тестов Тест Тестович, ООО Ромашка, 8 (900) 123-45-67."},
+    {"role": "user", "content": "Нужна консультация по демомодулю."},
+    {"role": "assistant", "content": "Какие сведения нужны? Мой номер для справок +7 999 111-11-11."},
+    {"role": "user", "content": "Оставлю заявку: Тестов Тест Тестович, ООО Ромашка, 8 (900) 123-45-67."},
 ]
 
 
@@ -110,7 +110,7 @@ class ExtractionTests(unittest.TestCase):
         contacts = extract_contacts(HISTORY, llm)
         self.assertEqual(contacts["company"], "ООО Ромашка")
         sent = llm.calls[0][1]["content"]
-        self.assertIn("Казани", sent)
+        self.assertIn("демомодулю", sent)
         self.assertNotIn("+7 999 111-11-11", sent)
 
     def test_phone_found_without_model(self):
@@ -123,20 +123,20 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(contacts["phone"], "+79001234567")
 
     def test_find_phone_skips_short_numbers(self):
-        self.assertEqual(find_phone("Около 800 м², 40 счётчиков"), "")
+        self.assertEqual(find_phone("Коды образцов: 800 и 40"), "")
 
 
 class SummaryTests(unittest.TestCase):
     def test_summary_from_model(self):
-        llm = ScriptedLLM("Клиент хочет солнечную станцию на складе в Казани, кровля около 800 м².")
-        self.assertIn("Казани", summarize_dialog(HISTORY, llm))
+        llm = ScriptedLLM("Клиенту нужна консультация по демомодулю.")
+        self.assertIn("демомодулю", summarize_dialog(HISTORY, llm))
         dialog = llm.calls[0][1]["content"]
         self.assertTrue(dialog.startswith("Клиент: "))
         self.assertIn("Консультант: ", dialog)
 
     def test_summary_fallback_without_model(self):
         summary = summarize_dialog(HISTORY, ScriptedLLM(error=RuntimeError("down")))
-        self.assertTrue(summary.startswith("Запрос клиента: Хотим поставить"))
+        self.assertTrue(summary.startswith("Запрос клиента: Нужна консультация"))
 
     def test_empty_history(self):
         self.assertEqual(summarize_dialog([], None), "")
@@ -145,11 +145,11 @@ class SummaryTests(unittest.TestCase):
 class PrepareLeadTests(unittest.TestCase):
     def test_form_values_override_dialog(self):
         extracted = json.dumps({"full_name": "Тестов Тест", "phone": "", "company": "ООО Ромашка"})
-        llm = ScriptedLLM(extracted, "Клиенту нужна солнечная станция.")
+        llm = ScriptedLLM(extracted, "Клиенту нужна консультация по демомодулю.")
         draft = prepare_lead(HISTORY, llm, form={"company": "АО Тест", "phone": " "})
         self.assertEqual(draft.company, "АО Тест")
         self.assertEqual(draft.phone, "+79001234567")
-        self.assertEqual(draft.summary, "Клиенту нужна солнечная станция.")
+        self.assertEqual(draft.summary, "Клиенту нужна консультация по демомодулю.")
         self.assertTrue(draft.is_complete)
 
     def test_works_without_model(self):
@@ -175,7 +175,7 @@ class MaskingTests(unittest.TestCase):
 
     def test_fallback_summary_has_no_contacts(self):
         summary = summarize_dialog(HISTORY, None)
-        self.assertTrue(summary.startswith("Запрос клиента: Хотим поставить"))
+        self.assertTrue(summary.startswith("Запрос клиента: Нужна консультация"))
         for secret in ("Тестов", "Тестович", "123-45-67", "8 (900)"):
             self.assertNotIn(secret, summary)
 

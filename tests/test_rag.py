@@ -28,56 +28,57 @@ from rag_engine import (  # noqa: E402
     split_markdown,
 )
 
-SOLAR_DOC = """# Солнечные станции
+MODULE_DOC = """# Демомодуль
 
-## Ориентация скатов
+## Характеристики
 
-Крыша на два ската, восток и запад: панели можно ставить на оба ската.
-Потери на восточном скате утром компенсируются выработкой западного вечером.
+Образцовый модуль имеет метку Альфа и используется для проверки поиска.
+
+## Дополнительные сведения
+
+Описание образца хранится в тестовом каталоге.
 """
 
-ASKUE_DOC = """# Учёт энергоресурсов
+DEVICE_DOC = """# Демоустройство
 
-## Совместимость модемов
+## Совместимость
 
-Сим-карта стороннего оператора подойдёт: менять её при подключении не нужно,
-связь с платформой идёт через любого мобильного оператора.
+Разъём серии Бета используется для подключения устройства.
 """
 
-TARIFF_DOC = """# Тарифы
+TABLE_DOC = """# Демоданные
 
 | Категория | Описание |
 | --- | --- |
-| Первая | Одноставочный тариф |
-| Вторая | День и ночь |
-| Третья | По часам суток |
+| Первая | Пример один |
+| Вторая | Пример два |
+| Третья | Пример три |
 """
 
 
 def _write_kb(root: Path) -> None:
-    (root / "20-products").mkdir(parents=True, exist_ok=True)
-    (root / "20-products" / "23-solar.md").write_text(SOLAR_DOC, encoding="utf-8")
-    (root / "20-products" / "22-askue.md").write_text(ASKUE_DOC, encoding="utf-8")
-    (root / "10-energy").mkdir(parents=True, exist_ok=True)
-    (root / "10-energy" / "tariffs.md").write_text(TARIFF_DOC, encoding="utf-8")
+    (root / "demo").mkdir(parents=True, exist_ok=True)
+    (root / "demo" / "module.md").write_text(MODULE_DOC, encoding="utf-8")
+    (root / "demo" / "device.md").write_text(DEVICE_DOC, encoding="utf-8")
+    (root / "demo" / "table.md").write_text(TABLE_DOC, encoding="utf-8")
 
 
 class ChunkingTests(unittest.TestCase):
     def test_chunks_keep_header_hierarchy_in_source(self) -> None:
-        chunks = split_markdown(SOLAR_DOC, "20-products/23-solar.md")
+        chunks = split_markdown(MODULE_DOC, "demo/module.md")
         self.assertTrue(chunks)
         sources = [source for source, _ in chunks]
-        self.assertTrue(any(source.startswith("20-products/23-solar.md > Солнечные станции") for source in sources))
+        self.assertTrue(any(source.startswith("demo/module.md > Демомодуль") for source in sources))
         self.assertTrue(all(text.strip() for _, text in chunks))
 
     def test_table_stays_in_one_chunk(self) -> None:
-        chunks = split_markdown(TARIFF_DOC, "10-energy/tariffs.md")
+        chunks = split_markdown(TABLE_DOC, "demo/table.md")
         tables = [text for _, text in chunks if "| Первая |" in text]
         self.assertEqual(len(tables), 1, "таблица разорвана между чанками")
         self.assertIn("| Третья |", tables[0])
 
     def test_chunk_length_is_limited(self) -> None:
-        long_doc = "# Раздел\n\n" + "\n\n".join(f"Абзац номер {index} с текстом про тарифы." for index in range(400))
+        long_doc = "# Раздел\n\n" + "\n\n".join(f"Абзац номер {index} с описанием образца." for index in range(400))
         chunks = split_markdown(long_doc, "long.md")
         self.assertTrue(chunks)
         for _, text in chunks:
@@ -85,17 +86,17 @@ class ChunkingTests(unittest.TestCase):
 
     def test_merge_does_not_mix_sources(self) -> None:
         """Короткие разделы с разными заголовками не склеиваются."""
-        doc = "# Раздел А\n\nКороткий текст про тарифы.\n\n# Раздел Б\n\nКороткий текст про счётчики.\n"
+        doc = "# Раздел А\n\nКороткое описание первого образца.\n\n# Раздел Б\n\nКороткое описание второго образца.\n"
         chunks = split_markdown(doc, "short.md")
         self.assertEqual(len(chunks), 2)
         self.assertTrue(chunks[0][0].endswith("Раздел А"))
         self.assertTrue(chunks[1][0].endswith("Раздел Б"))
-        self.assertNotIn("счётчик", chunks[0][1])
-        self.assertNotIn("тариф", chunks[1][1])
+        self.assertNotIn("второго образца", chunks[0][1])
+        self.assertNotIn("первого образца", chunks[1][1])
 
     def test_oversized_single_line_is_split(self) -> None:
         """Строка без переносов длиннее лимита должна резаться, а не оставаться чанком."""
-        line = "тариф" * 1000  # 5000 символов без переносов и пробелов
+        line = "образец" * 1000  # длинная строка без переносов и пробелов
         pieces = rag_engine._split_oversized(line, MAX_CHUNK_CHARS, OVERLAP_CHARS)
         self.assertGreater(len(pieces), 1)
         for piece in pieces:
@@ -123,29 +124,27 @@ class RetrievalTests(unittest.TestCase):
 
     def test_retrieve_returns_matching_file(self) -> None:
         retriever = self._retriever()
-        chunks = retriever.retrieve("Крыша на два ската, панели на восток и запад", top_k=5)
+        chunks = retriever.retrieve("образцовый модуль метка", top_k=5)
         self.assertTrue(chunks)
-        self.assertIn("23-solar.md", chunks[0].source)
+        self.assertIn("demo/module.md", chunks[0].source)
         self.assertIsNotNone(chunks[0].score)
 
     def test_retrieve_second_question(self) -> None:
         retriever = self._retriever()
-        chunks = retriever.retrieve("Симки другого оператора в счётчиках менять?", top_k=5)
+        chunks = retriever.retrieve("Разъём серии бета у устройства", top_k=5)
         self.assertTrue(chunks)
-        self.assertIn("22-askue.md", chunks[0].source)
+        self.assertIn("demo/device.md", chunks[0].source)
 
-    def test_colloquial_sim_query_matches_sim_cards(self) -> None:
-        """«симки» в вопросе и «сим-карты» в базе должны сойтись после усечения."""
+    def test_inflected_query_matches_fixture_text(self) -> None:
+        """Словоформа запроса должна находить фрагмент с базовой формой слова."""
         retriever = self._retriever()
-        chunks = retriever.retrieve(
-            "В счётчиках стоят симки другого оператора. Для вашей платформы их надо менять?", top_k=5
-        )
+        chunks = retriever.retrieve("Где разместить образцовый модуль?", top_k=5)
         self.assertTrue(chunks)
-        self.assertIn("сим-карт", chunks[0].text.lower())
+        self.assertIn("модуль", chunks[0].text.lower())
 
     def test_scores_are_positive_floats(self) -> None:
         """Движок режет по 0.5 * max(score): ноль и отрицательные значения ломают отсев."""
-        chunks = self._retriever().retrieve("крыша скаты панели", top_k=20)
+        chunks = self._retriever().retrieve("образцовый модуль", top_k=20)
         self.assertTrue(chunks)
         for chunk in chunks:
             self.assertIsInstance(chunk.score, float)
@@ -156,12 +155,12 @@ class RetrievalTests(unittest.TestCase):
 
     def test_empty_knowledge_base_returns_empty(self) -> None:
         with tempfile.TemporaryDirectory() as empty:
-            self.assertEqual(RagRetriever(Path(empty), use_dense=False).retrieve("тариф", top_k=5), [])
+            self.assertEqual(RagRetriever(Path(empty), use_dense=False).retrieve("образец", top_k=5), [])
 
     def test_bm25_works_when_embeddings_unavailable(self) -> None:
         with mock.patch.object(rag_engine, "_embed_texts", side_effect=RuntimeError("прокси недоступен")):
             retriever = RagRetriever(self.kb_root, use_dense=True)
-            chunks = retriever.retrieve("крыша скаты панели", top_k=5)
+            chunks = retriever.retrieve("образцовый модуль", top_k=5)
         self.assertTrue(chunks, "без эмбеддингов BM25 должен продолжать работать")
 
     def test_bm25_fallback_when_dense_search_fails(self) -> None:
@@ -172,9 +171,9 @@ class RetrievalTests(unittest.TestCase):
             retriever = RagRetriever(self.kb_root, use_dense=True)
             retriever.retrieve("прогрев", top_k=1)
             with mock.patch.object(RagRetriever, "_query_vector", side_effect=RuntimeError("таймаут")):
-                chunks = retriever.retrieve("Крыша на два ската, панели на восток", top_k=5)
+                chunks = retriever.retrieve("образцовый модуль", top_k=5)
         self.assertTrue(chunks, "при падении dense должны вернуться результаты BM25")
-        self.assertIn("23-solar.md", chunks[0].source)
+        self.assertIn("demo/module.md", chunks[0].source)
 
     def test_dense_low_similarity_is_filtered(self) -> None:
         """Фрагменты с косинусом ниже порога не добавляются к выдаче."""
@@ -186,8 +185,8 @@ class RetrievalTests(unittest.TestCase):
             return [[1.0, 0.0] for _ in texts]
 
         with mock.patch.object(rag_engine, "_embed_texts", side_effect=fake_embed):
-            dense = RagRetriever(self.kb_root, use_dense=True).retrieve("Крыша на два ската панели", top_k=5)
-        lexical = self._retriever().retrieve("Крыша на два ската панели", top_k=5)
+            dense = RagRetriever(self.kb_root, use_dense=True).retrieve("образцовый модуль", top_k=5)
+        lexical = self._retriever().retrieve("образцовый модуль", top_k=5)
         self.assertTrue(dense)
         self.assertEqual([chunk.source for chunk in dense], [chunk.source for chunk in lexical])
         self.assertLess(rag_engine.DENSE_MIN_SIMILARITY, 1.0)
@@ -198,13 +197,13 @@ class RetrievalTests(unittest.TestCase):
             return [[1.0, 0.0, 0.0, 0.0] if index % 2 == 0 else [0.0, 1.0, 0.0, 0.0] for index in range(len(texts))]
 
         def fake_rerank(query, documents, timeout=20.0):
-            return [-8.0, -12.0, -3.5][: len(documents)]
+            return [-8.0 - index for index in range(len(documents))]
 
         with mock.patch.dict(os.environ, {"RERANKER_MODEL": "test-reranker"}, clear=False):
             with mock.patch.object(rag_engine, "_embed_texts", side_effect=fake_embed):
                 with mock.patch.object(rag_engine, "_rerank", side_effect=fake_rerank):
                     retriever = RagRetriever(self.kb_root, use_dense=True)
-                    chunks = retriever.retrieve("крыша скаты", top_k=5)
+                    chunks = retriever.retrieve("образцовый модуль", top_k=5)
         self.assertTrue(chunks)
         for chunk in chunks:
             self.assertIsNotNone(chunk.score)
@@ -212,13 +211,13 @@ class RetrievalTests(unittest.TestCase):
 
     # -- второй аудит: реранкер, эмбеддинги, косинус ----------------------
 
-    def _baseline_order(self, query: str = "Крыша на два ската панели"):
+    def _baseline_order(self, query: str = "образцовый модуль"):
         return [chunk.source for chunk in self._retriever().retrieve(query, top_k=5)]
 
     def _order_with_rerank(self, response):
         with mock.patch.dict(os.environ, {"RERANKER_MODEL": "test-reranker"}, clear=False):
             with mock.patch.object(rag_engine, "_post_json", side_effect=response):
-                chunks = self._retriever().retrieve("Крыша на два ската панели", top_k=5)
+                chunks = self._retriever().retrieve("образцовый модуль", top_k=5)
         return [chunk.source for chunk in chunks]
 
     def test_rerank_partial_response_keeps_original_order(self) -> None:
@@ -283,7 +282,7 @@ class RetrievalTests(unittest.TestCase):
             self.assertTrue(order, "BM25-результаты не должны теряться")
             self.assertEqual(order, baseline)
 
-    def _order_with_embeddings(self, response, query: str = "Крыша на два ската"):
+    def _order_with_embeddings(self, response, query: str = "образцовый модуль"):
         environment = {"EMB_MODEL": "test-embed", "LLM_BASE_URL": "http://proxy.local"}
         with mock.patch.dict(os.environ, environment, clear=False):
             with mock.patch.object(rag_engine, "_post_json", side_effect=response):
@@ -303,7 +302,7 @@ class RetrievalTests(unittest.TestCase):
 
         retriever, order = self._order_with_embeddings(response)
         self.assertIsNone(retriever._dense, "плотный канал должен отключиться")
-        self.assertEqual(order, self._baseline_order("Крыша на два ската"))
+        self.assertEqual(order, self._baseline_order("образцовый модуль"))
 
     def test_embeddings_non_finite_values_disables_dense(self) -> None:
         def response(path, body, timeout=0, attempts=0):
@@ -317,7 +316,7 @@ class RetrievalTests(unittest.TestCase):
 
         retriever, order = self._order_with_embeddings(response)
         self.assertIsNone(retriever._dense, "плотный канал должен отключиться")
-        self.assertEqual(order, self._baseline_order("Крыша на два ската"))
+        self.assertEqual(order, self._baseline_order("образцовый модуль"))
 
     def test_cosine_similarity_rejects_different_lengths(self) -> None:
         self.assertIsNone(rag_engine._cosine_similarity([1.0, 2.0], [1.0]))
@@ -340,7 +339,7 @@ class RetrievalTests(unittest.TestCase):
 
             def worker() -> None:
                 try:
-                    results.append(retriever.retrieve("тариф", top_k=3))
+                    results.append(retriever.retrieve("модуль", top_k=3))
                 except Exception as exc:  # pragma: no cover - диагностика
                     errors.append(exc)
 
@@ -360,7 +359,7 @@ class KnowledgeBaseDiscoveryTests(unittest.TestCase):
             root = Path(tmp)
             source = root / "src"
             source.mkdir()
-            (source / "doc.md").write_text("# Раздел\n\nТекст про счётчики.", encoding="utf-8")
+            (source / "doc.md").write_text("# Раздел\n\nОписание демоэлемента.", encoding="utf-8")
             archive = root / "knowledge-base.zip"
             with zipfile.ZipFile(archive, "w") as bundle:
                 bundle.write(source / "doc.md", "doc.md")

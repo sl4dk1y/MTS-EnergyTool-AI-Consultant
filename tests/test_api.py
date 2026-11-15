@@ -38,13 +38,13 @@ class EchoLLM:
         if messages[0]["content"].startswith("Из реплик клиента"):
             return json.dumps({"full_name": "", "phone": "", "company": ""})
         if messages[0]["content"].startswith("Ты помогаешь менеджеру"):
-            return "Клиенту нужна солнечная станция на складе."
+            return "Клиенту нужна консультация по демомодулю."
         return f"Ответ {len(self.calls)}"
 
 
 class OneChunkRetriever:
     def retrieve(self, query, top_k=5):
-        return [RetrievedChunk(text="Про солнечные станции.", source="23-solar.md > Размещение", score=1.0)]
+        return [RetrievedChunk(text="Описание демомодуля.", source="demo/module.md > Описание", score=1.0)]
 
 
 class ApiTests(unittest.TestCase):
@@ -85,14 +85,14 @@ class ApiTests(unittest.TestCase):
 
     def test_chat_keeps_history_and_returns_debug_info(self):
         session_id = self.new_session()
-        first = self.say(session_id, "Хотим солнечную станцию")
-        self.assertEqual(first["assistant_message"]["sources"], ["23-solar.md > Размещение"])
+        first = self.say(session_id, "Нужна консультация по демомодулю")
+        self.assertEqual(first["assistant_message"]["sources"], ["demo/module.md > Описание"])
         self.assertIsInstance(first["assistant_message"]["elapsed_ms"], int)
-        self.say(session_id, "А на фасад можно?")
+        self.say(session_id, "Где посмотреть его описание?")
         sent = self.llm.calls[-1]
         self.assertEqual([m["role"] for m in sent], ["system", "user", "assistant", "user"])
-        self.assertEqual(sent[1]["content"], "Хотим солнечную станцию")
-        self.assertIn("Вопрос клиента:\nА на фасад можно?", sent[-1]["content"])
+        self.assertEqual(sent[1]["content"], "Нужна консультация по демомодулю")
+        self.assertIn("Вопрос клиента:\nГде посмотреть его описание?", sent[-1]["content"])
         messages = self.client.get(f"/api/sessions/{session_id}").json()["messages"]
         self.assertEqual([m["role"] for m in messages], ["user", "assistant", "user", "assistant"])
 
@@ -129,12 +129,12 @@ class ApiTests(unittest.TestCase):
 
     def test_lead_draft_reports_missing_fields(self):
         session_id = self.new_session()
-        self.say(session_id, "Нужна станция на складе, телефон 8 900 123-45-67")
-        draft = self.client.post(f"/api/sessions/{session_id}/lead/draft", json={"company": "Ромашка"}).json()
+        self.say(session_id, "Нужна консультация, телефон 8 900 123-45-67")
+        draft = self.client.post(f"/api/sessions/{session_id}/lead/draft", json={"company": "Пример"}).json()
         self.assertEqual(draft["phone"], "+79001234567")
-        self.assertEqual(draft["company"], "Ромашка")
+        self.assertEqual(draft["company"], "Пример")
         self.assertEqual(draft["missing"], ["full_name"])
-        self.assertTrue(draft["summary"].startswith("Запрос клиента: Нужна станция на складе"))
+        self.assertTrue(draft["summary"].startswith("Запрос клиента: Нужна консультация"))
         self.assertNotIn("123-45-67", draft["summary"])
         # До согласия история не уходит в модель, черновик собирается без неё.
         self.assertEqual(len(self.llm.calls), 1)
@@ -142,13 +142,13 @@ class ApiTests(unittest.TestCase):
 
     def test_lead_submit_flow(self):
         session_id = self.new_session()
-        self.say(session_id, "Нужна станция на складе")
+        self.say(session_id, "Нужна консультация")
         response = self.client.post(f"/api/sessions/{session_id}/lead", json=LEAD)
         self.assertEqual(response.status_code, 201, response.text)
         lead = response.json()
         self.assertEqual(lead["phone"], "+79001234567")
         self.assertEqual(lead["full_name"], "Тестов Тест")
-        self.assertEqual(lead["summary"], "Клиенту нужна солнечная станция на складе.")
+        self.assertEqual(lead["summary"], "Клиенту нужна консультация по демомодулю.")
         leads = self.client.get("/api/leads", headers=ADMIN).json()
         self.assertEqual([item["id"] for item in leads], [lead["id"]])
         messages = self.client.get(f"/api/sessions/{session_id}").json()["messages"]
@@ -166,10 +166,10 @@ class ApiTests(unittest.TestCase):
 
     def test_handoff_uses_last_question(self):
         session_id = self.new_session()
-        self.say(session_id, "Как настроить конкретный счётчик?")
+        self.say(session_id, "Как открыть карточку элемента?")
         response = self.client.post(f"/api/sessions/{session_id}/handoff", json={})
         self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.json()["question"], "Как настроить конкретный счётчик?")
+        self.assertEqual(response.json()["question"], "Как открыть карточку элемента?")
         self.assertEqual(len(self.client.get("/api/handoffs", headers=ADMIN).json()), 1)
         empty = self.new_session()
         self.assertEqual(self.client.post(f"/api/sessions/{empty}/handoff", json={}).status_code, 422)

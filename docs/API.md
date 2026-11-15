@@ -76,8 +76,8 @@ cd react-frontend/client && npm install && npm run dev
   "created_at": "...",
   "updated_at": "...",
   "messages": [
-    {"id": 1, "role": "user", "content": "Хотим солнечную станцию", "sources": [], "elapsed_ms": null, "created_at": "..."},
-    {"id": 2, "role": "assistant", "content": "Да, ...", "sources": ["20-products/23-solar.md > Размещение"], "elapsed_ms": 2350, "created_at": "..."}
+    {"id": 1, "role": "user", "content": "Нужна консультация", "sources": [], "elapsed_ms": null, "created_at": "..."},
+    {"id": 2, "role": "assistant", "content": "Да, ...", "sources": ["demo/example.md > Общий раздел"], "elapsed_ms": 2350, "created_at": "..."}
   ]
 }
 ```
@@ -101,9 +101,9 @@ cd react-frontend/client && npm install && npm run dev
 ```json
 {
   "full_name": "",
-  "phone": "+79001234567",
-  "company": "Ромашка",
-  "summary": "Клиенту нужна солнечная станция на складе...",
+  "phone": "<телефон>",
+  "company": "ООО Пример",
+  "summary": "Клиент описал задачу по учёту энергии...",
   "errors": {},
   "missing": ["full_name"],
   "is_complete": false,
@@ -114,7 +114,7 @@ cd react-frontend/client && npm install && npm run dev
 ### `POST /api/sessions/{id}/lead` → 201
 Тело `{"full_name": "...", "phone": "...", "company": "...", "summary": "...", "consent": true}`. Если `summary` пустое, резюме по диалогу пишет модель, это происходит только после согласия. Контакты в резюме маскируются, и в присланном клиентом тоже. Без `consent: true` или при ошибках в полях ответ 422.
 ```json
-{"id": "a2b4...", "session_id": "6f1c...", "full_name": "Тестов Тест", "phone": "+79001234567", "company": "ООО Ромашка", "summary": "...", "created_at": "..."}
+{"id": "a2b4...", "session_id": "6f1c...", "full_name": "Тестовый Клиент", "phone": "<телефон>", "company": "ООО Пример", "summary": "...", "created_at": "..."}
 ```
 Ошибка валидации
 ```json

@@ -25,22 +25,22 @@ from consultant_engine import (
 )
 from kb_search import KnowledgeBaseSearch, chunk_documents, read_documents, tokenize
 
-SOLAR_DOC = """# Солнечные станции
+MODULE_DOC = """# Демомодуль
 
 ## Размещение
 
-Панели можно ставить на скатную кровлю с ориентацией на восток и запад.
+Образцовый модуль размещают на полке.
 
-## Кровля
+## Корпус
 
-Монтаж на старой шиферной кровле экономически сомнительный.
+Перед повторным использованием корпуса его состояние проверяют.
 """
 
-METER_DOC = """# Распознавание показаний
+DEVICE_DOC = """# Демоустройство
 
-## Что распознаётся
+## Сведения
 
-Сервис читает показания многотарифных счётчиков, серийный номер и год выпуска.
+В карточке устройства записаны код модели и год регистрации.
 """
 
 
@@ -71,9 +71,9 @@ class FakeRetriever:
 
 
 CHUNKS = [
-    RetrievedChunk(text="Панели ставят на восток и запад.", source="solar.md > Размещение", score=3.0),
-    RetrievedChunk(text="Шиферная кровля сомнительна.", source="solar.md > Кровля", score=2.0),
-    RetrievedChunk(text="Ещё про размещение.", source="solar.md > Размещение", score=1.0),
+    RetrievedChunk(text="Образцовый модуль размещают на полке.", source="demo/module.md > Размещение", score=3.0),
+    RetrievedChunk(text="Перед использованием проверяют состояние.", source="demo/module.md > Корпус", score=2.0),
+    RetrievedChunk(text="Дополнительный пример размещения.", source="demo/module.md > Размещение", score=1.0),
 ]
 
 
@@ -83,25 +83,25 @@ class EngineTests(unittest.TestCase):
         retriever = FakeRetriever(CHUNKS)
         engine = ConsultantEngine(llm, retriever, top_k=3)
         request = ConsultantRequest(
-            question="А на оба ската можно?",
+            question="А его можно поставить туда?",
             history=[
-                {"role": "user", "content": "Хотим солнечную станцию"},
-                {"role": "assistant", "content": "Какая у вас кровля?"},
+                {"role": "user", "content": "Нужен образцовый модуль"},
+                {"role": "assistant", "content": "Где его разместить?"},
             ],
         )
 
         response = engine.consult(request)
 
         self.assertEqual(response.answer, "Да, можно. В каком регионе объект?")
-        self.assertEqual(response.sources, ["solar.md > Размещение", "solar.md > Кровля"])
+        self.assertEqual(response.sources, ["demo/module.md > Размещение", "demo/module.md > Корпус"])
         messages = llm.calls[0]
         self.assertEqual(messages[0]["role"], "system")
         self.assertEqual([m["role"] for m in messages], ["system", "user", "assistant", "user"])
-        self.assertEqual(messages[1]["content"], "Хотим солнечную станцию")
-        self.assertIn("Панели ставят на восток и запад.", messages[-1]["content"])
-        self.assertTrue(messages[-1]["content"].endswith("Вопрос клиента:\nА на оба ската можно?"))
+        self.assertEqual(messages[1]["content"], "Нужен образцовый модуль")
+        self.assertIn("Образцовый модуль размещают на полке.", messages[-1]["content"])
+        self.assertTrue(messages[-1]["content"].endswith("Вопрос клиента:\nА его можно поставить туда?"))
         query, top_k = retriever.queries[0]
-        self.assertIn("Хотим солнечную станцию", query)
+        self.assertIn("Нужен образцовый модуль", query)
         self.assertEqual(top_k, 3)
 
     def test_llm_error_gives_fallback_instead_of_exception(self):
@@ -249,9 +249,9 @@ class KnowledgeBaseSearchTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.zip_path = self.root / "knowledge-base.zip"
         with zipfile.ZipFile(self.zip_path, "w") as archive:
-            archive.writestr("20-products/23-solar.md", SOLAR_DOC)
-            archive.writestr("20-products/25-meter.md", METER_DOC)
-            archive.writestr("__MACOSX/._23-solar.md", "мусор")
+            archive.writestr("demo/module.md", MODULE_DOC)
+            archive.writestr("demo/device.md", DEVICE_DOC)
+            archive.writestr("__MACOSX/._module.md", "мусор")
             archive.writestr("image.png", b"\x89PNG")
 
     def tearDown(self):
@@ -259,20 +259,20 @@ class KnowledgeBaseSearchTests(unittest.TestCase):
 
     def test_reads_only_text_documents_from_zip(self):
         names = [name for name, _ in read_documents(self.zip_path)]
-        self.assertEqual(names, ["20-products/23-solar.md", "20-products/25-meter.md"])
+        self.assertEqual(names, ["demo/device.md", "demo/module.md"])
 
     def test_chunks_keep_heading_path(self):
         chunks = chunk_documents(read_documents(self.zip_path))
         sources = [chunk.source for chunk in chunks]
-        self.assertIn("20-products/23-solar.md > Солнечные станции > Кровля", sources)
+        self.assertIn("demo/module.md > Демомодуль > Корпус", sources)
         self.assertTrue(all(chunk.text.strip() for chunk in chunks))
 
     def test_search_finds_relevant_section_with_word_forms(self):
         search = KnowledgeBaseSearch.from_path(self.zip_path)
-        top = search.retrieve("У нас старая шиферная крыша, стоит ставить панели?", top_k=1)
-        self.assertEqual(top[0].source, "20-products/23-solar.md > Солнечные станции > Кровля")
-        top = search.retrieve("Сервис прочитает год выпуска счётчика?", top_k=1)
-        self.assertIn("25-meter.md", top[0].source)
+        top = search.retrieve("Где размещают образцовый модуль?", top_k=1)
+        self.assertEqual(top[0].source, "demo/module.md > Демомодуль > Размещение")
+        top = search.retrieve("В карточке устройства указан год регистрации?", top_k=1)
+        self.assertIn("demo/device.md", top[0].source)
         self.assertGreater(top[0].score, 0)
 
     def test_empty_query_returns_nothing(self):
@@ -280,8 +280,8 @@ class KnowledgeBaseSearchTests(unittest.TestCase):
         self.assertEqual(search.retrieve("и в на", top_k=3), [])
 
     def test_tokenize_matches_word_forms(self):
-        self.assertEqual(tokenize("станция"), tokenize("станцию"))
-        self.assertEqual(tokenize("Счётчики"), tokenize("счетчиков"))
+        self.assertEqual(tokenize("модуль"), tokenize("модулю"))
+        self.assertEqual(tokenize("устройства"), tokenize("устройств"))
 
     def test_eval_script_counts_hits(self):
         spec = importlib.util.spec_from_file_location(
@@ -291,8 +291,8 @@ class KnowledgeBaseSearchTests(unittest.TestCase):
         spec.loader.exec_module(module)
         search = KnowledgeBaseSearch.from_path(self.zip_path)
         cases = [
-            ("1", "Старая шиферная крыша подойдёт под панели?", ["23-solar.md"]),
-            ("2", "Прочитаете год выпуска счётчика?", ["23-solar.md"]),
+            ("1", "Где размещают образцовый модуль?", ["demo/module.md"]),
+            ("2", "В карточке устройства указан год регистрации?", ["demo/missing.md"]),
         ]
         rows, misses = module.evaluate(search, cases, top_k=1, cutoffs=[0.0])
         self.assertEqual(rows[0]["hit@1"], 0.5)
@@ -383,7 +383,7 @@ class KnowledgeBaseSearchTests(unittest.TestCase):
             engine = consultant_engine.build_default_engine()
         self.assertIsNone(engine.retriever_name)
         self.assertIn("база знаний не найдена", log.getvalue())
-        response = engine.consult(ConsultantRequest(question="Можно панели на крышу?"))
+        response = engine.consult(ConsultantRequest(question="Как использовать демомодуль?"))
         self.assertEqual(response.answer, NO_CONTEXT_ANSWER)
 
     def test_found_base_is_reported(self):
