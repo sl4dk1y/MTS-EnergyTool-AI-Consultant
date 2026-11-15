@@ -1,4 +1,6 @@
+import contextlib
 import importlib.util
+import io
 import os
 import sys
 import tempfile
@@ -308,6 +310,101 @@ class KnowledgeBaseSearchTests(unittest.TestCase):
             engine = consultant_engine.build_default_engine()
         self.assertIsInstance(engine._retriever, KnowledgeBaseSearch)
         self.assertGreater(len(engine._retriever), 0)
+
+    def test_knowledge_base_layouts_are_found(self):
+        from kb_search import find_knowledge_base
+
+        layouts = {
+            "knowledge-base.zip": lambda root: self._zip_copy(root / "knowledge-base.zip"),
+            "kb.zip": lambda root: self._zip_copy(root / "kb.zip"),
+            "knowledge-base": lambda root: self._unpack(root / "knowledge-base"),
+            "knowledge_base": lambda root: self._unpack(root / "knowledge_base"),
+            "kb": lambda root: self._unpack(root / "kb"),
+        }
+        for name, make in layouts.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                make(root)
+                self.assertEqual(find_knowledge_base(root), root / name)
+
+    def test_unpacked_base_directly_in_data_dir(self):
+        from kb_search import find_knowledge_base
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            self._unpack(root)
+            (root / "questions.csv").write_text("id,question\n", encoding="utf-8")
+            self.assertEqual(find_knowledge_base(root), root)
+            self.assertGreater(len(KnowledgeBaseSearch.from_path(root)), 0)
+
+    def test_data_dir_wins_over_extra_dirs(self):
+        from kb_search import find_knowledge_base
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            self._unpack(root / "data")
+            (root / "local-data").mkdir()
+            self._zip_copy(root / "local-data" / "knowledge-base.zip")
+            self.assertEqual(find_knowledge_base(root / "data", (root / "local-data",)), root / "data")
+
+    def test_code_directory_is_not_taken_for_base(self):
+        from kb_search import find_knowledge_base
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "docs").mkdir()
+            (root / "docs" / "README.md").write_text("# Документация", encoding="utf-8")
+            (root / "solution.py").write_text("print()", encoding="utf-8")
+            self.assertIsNone(find_knowledge_base(root))
+            self.assertIsNone(find_knowledge_base(root / "нет-такой"))
+
+    def test_extra_dirs_are_searched(self):
+        from kb_search import find_knowledge_base
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "local-data").mkdir()
+            self._zip_copy(root / "local-data" / "knowledge-base.zip")
+            found = find_knowledge_base(root / "data", (root / "local-data",))
+            self.assertEqual(found, root / "local-data" / "knowledge-base.zip")
+
+    def test_missing_base_is_reported(self):
+        env = {
+            "DATA_DIR": str(self.root / "пусто"),
+            "LLM_BASE_URL": "http://proxy",
+            "LLM_API_KEY": "k",
+            "LLM_MODEL": "m",
+        }
+        log = io.StringIO()
+        # В рабочей копии может лежать local-data с настоящей базой, поэтому поиск подменяем.
+        with mock.patch.dict(os.environ, env, clear=False), contextlib.redirect_stderr(log), mock.patch(
+            "kb_search.find_knowledge_base", return_value=None
+        ):
+            engine = consultant_engine.build_default_engine()
+        self.assertIsNone(engine.retriever_name)
+        self.assertIn("база знаний не найдена", log.getvalue())
+        response = engine.consult(ConsultantRequest(question="Можно панели на крышу?"))
+        self.assertEqual(response.answer, NO_CONTEXT_ANSWER)
+
+    def test_found_base_is_reported(self):
+        env = {"DATA_DIR": str(self.root), "LLM_BASE_URL": "http://proxy", "LLM_API_KEY": "k", "LLM_MODEL": "m", "RETRIEVER": "bm25"}
+        log = io.StringIO()
+        with mock.patch.dict(os.environ, env, clear=False), contextlib.redirect_stderr(log):
+            engine = consultant_engine.build_default_engine()
+        self.assertEqual(engine.retriever_name, "KnowledgeBaseSearch")
+        self.assertIn("поиск KnowledgeBaseSearch", log.getvalue())
+
+    def _zip_copy(self, target):
+        target.write_bytes(self.zip_path.read_bytes())
+
+    def _unpack(self, target):
+        target.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(self.zip_path) as archive:
+            for name in archive.namelist():
+                if name.endswith(".md"):
+                    path = target / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(archive.read(name))
 
     def test_rag_engine_is_used_when_present(self):
         fake_rag = types.ModuleType("rag_engine")

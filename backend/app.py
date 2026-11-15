@@ -144,7 +144,17 @@ def create_app(
 
     @app.get("/api/health")
     def health() -> dict:
-        return {"status": "ok", "engine": "ready" if provider.get() else "not_configured"}
+        engine = provider.get()
+        if engine is None:
+            return {"status": "ok", "engine": "not_configured", "knowledge_base": "unknown", "retriever": None}
+        retriever = engine.retriever_name
+        return {
+            "status": "ok" if retriever else "degraded",
+            "engine": "ready",
+            # missing значит, что движок не нашёл базу и на любой вопрос ответит, что данных нет.
+            "knowledge_base": "found" if retriever else "missing",
+            "retriever": retriever,
+        }
 
     @app.post("/api/sessions", status_code=201)
     def create_session() -> dict:

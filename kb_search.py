@@ -173,11 +173,45 @@ class KnowledgeBaseSearch:
         return result
 
 
+KB_ARCHIVE_NAMES = ("knowledge-base.zip", "knowledge_base.zip", "kb.zip")
+KB_DIRECTORY_NAMES = ("knowledge-base", "knowledge_base", "kb")
+
+
+def _looks_like_unpacked_kb(directory: Path) -> bool:
+    """Каталог данных, в который базу распаковали без папки-обёртки.
+
+    Считаем базой каталог с Markdown или TXT файлами, в котором нет кода
+    Python, чтобы случайно не принять за базу корень репозитория с docs/.
+    """
+    if not directory.is_dir() or any(directory.glob("*.py")) or (directory / ".git").exists():
+        return False
+    return any(
+        path.suffix.lower() in TEXT_SUFFIXES and not path.name.startswith(".")
+        for path in directory.rglob("*")
+        if path.is_file()
+    )
+
+
 def find_knowledge_base(data_dir: Path, extra_dirs: Iterable[Path] = ()) -> Optional[Path]:
-    names = ("knowledge-base.zip", "knowledge_base.zip", "kb.zip", "knowledge-base")
-    for base in (data_dir, *extra_dirs):
-        for name in names:
+    """Ищет базу знаний в data_dir, затем в extra_dirs.
+
+    Подходит архив или каталог с одним из стандартных имён. Сам data_dir тоже
+    считается базой, если архив распакован прямо в него.
+    """
+    def by_name(base: Path) -> Optional[Path]:
+        for name in (*KB_ARCHIVE_NAMES, *KB_DIRECTORY_NAMES):
             candidate = base / name
-            if candidate.exists():
+            if candidate.is_file() if name.endswith(".zip") else candidate.is_dir():
                 return candidate
-    return None
+        return None
+
+    # Сначала всё, что лежит в самом DATA_DIR, и только потом запасные места.
+    data_dir = Path(data_dir)
+    found = by_name(data_dir)
+    if found is None and _looks_like_unpacked_kb(data_dir):
+        found = data_dir
+    for base in extra_dirs:
+        if found is not None:
+            break
+        found = by_name(Path(base))
+    return found
