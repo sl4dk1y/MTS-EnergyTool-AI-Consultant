@@ -169,6 +169,12 @@ class EngineTests(unittest.TestCase):
         self.assertIn("попроси ФИО", web_llm.calls[0][0]["content"])
         self.assertNotIn("ФИО", consultant_engine.SYSTEM_PROMPT)
 
+    def test_thinking_is_disabled_and_markdown_removed(self):
+        llm = FakeLLM(reply="<think>\n\n</think>\n\nКонсультант: **Да**, можно [2].")
+        response = ConsultantEngine(llm, FakeRetriever(CHUNKS)).consult(ConsultantRequest(question="Вопрос"))
+        self.assertTrue(llm.calls[0][0]["content"].startswith("/no_think"))
+        self.assertEqual(response.answer, "Да, можно.")
+
 class PromptHelpersTests(unittest.TestCase):
     def test_search_query_includes_short_question_and_history(self):
         request = ConsultantRequest(
@@ -233,7 +239,7 @@ class PromptHelpersTests(unittest.TestCase):
         self.assertEqual(filter_by_relative_score(chunks, 0), chunks)
 
     def test_clean_answer_removes_reasoning_and_markers(self):
-        self.assertEqual(clean_answer("<think>долго думаю</think>\nОтвет: Да, можно [1]."), "Да, можно .")
+        self.assertEqual(clean_answer("<think>долго думаю</think>\nОтвет: Да, можно [1]."), "Да, можно.")
         self.assertEqual(clean_answer("рассуждение без начала</think>Нет."), "Нет.")
         self.assertEqual(clean_answer("Да.<think>оборванное рассуждение"), "Да.")
 
@@ -429,6 +435,25 @@ class KnowledgeBaseSearchTests(unittest.TestCase):
             self.assertIsInstance(consultant_engine.build_retriever(self.zip_path), KnowledgeBaseSearch)
         self.assertIsNone(consultant_engine.build_retriever(None))
 
+
+    def test_engine_settings_ignore_small_platform_values(self):
+        env = {
+            "DATA_DIR": str(self.root),
+            "LLM_BASE_URL": "http://proxy",
+            "LLM_API_KEY": "k",
+            "LLM_MODEL": "m",
+            "RETRIEVER": "bm25",
+            "TOP_K": "3",
+            "MAX_TOKENS": "256",
+        }
+        with mock.patch.dict(os.environ, env, clear=False), contextlib.redirect_stderr(io.StringIO()):
+            engine = consultant_engine.build_default_engine()
+        self.assertEqual(engine._top_k, consultant_engine.DEFAULT_TOP_K)
+        self.assertEqual(engine.llm._max_tokens, consultant_engine.MIN_MAX_TOKENS)
+        with mock.patch.dict(os.environ, {**env, "ENGINE_TOP_K": "6", "MAX_TOKENS": "4096"}, clear=False), contextlib.redirect_stderr(io.StringIO()):
+            engine = consultant_engine.build_default_engine()
+        self.assertEqual(engine._top_k, 6)
+        self.assertEqual(engine.llm._max_tokens, 4096)
 
 if __name__ == "__main__":
     unittest.main()
