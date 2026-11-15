@@ -174,6 +174,50 @@ class AdapterTests(unittest.TestCase):
         self.assertIn("Строка 3", log.getvalue())
         self.assertNotIn("do-not-log", log.getvalue())
 
+    def test_fallback_answers_replace_generic_text(self):
+        self.write_input([("ok", "хороший"), ("bad", "плохой"), ("slow", "медленный")])
+        release = threading.Event()
+
+        def consult(request):
+            if request.question == "плохой":
+                raise RuntimeError("boom")
+            if request.question == "медленный":
+                release.wait(5)
+            return ConsultantResponse(answer="ответ модели")
+
+        def fallback(request):
+            return f"из базы про {request.question}"
+
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                run_adapter(
+                    self.input_path,
+                    self.output_path,
+                    consult,
+                    max_workers=3,
+                    deadline=time.monotonic() + 0.3,
+                    fallback=fallback,
+                )
+        finally:
+            release.set()
+        self.assertEqual(
+            self.read_output(),
+            {"ok": "ответ модели", "bad": "из базы про плохой", "slow": "из базы про медленный"},
+        )
+
+    def test_broken_fallback_keeps_generic_text(self):
+        self.write_input([("1", "q")])
+
+        def consult(request):
+            raise RuntimeError("boom")
+
+        def fallback(request):
+            raise ValueError("тоже упал")
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            run_adapter(self.input_path, self.output_path, consult, fallback=fallback)
+        self.assertEqual(self.read_output(), {"1": FALLBACK_ANSWER})
+
     def test_missing_engine_is_explicit(self):
         env = dict(os.environ)
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])

@@ -171,9 +171,127 @@ class EngineTests(unittest.TestCase):
 
     def test_thinking_is_disabled_and_markdown_removed(self):
         llm = FakeLLM(reply="<think>\n\n</think>\n\nКонсультант: **Да**, можно [2].")
-        response = ConsultantEngine(llm, FakeRetriever(CHUNKS)).consult(ConsultantRequest(question="Вопрос"))
-        self.assertTrue(llm.calls[0][0]["content"].startswith("/no_think"))
+        with mock.patch.object(consultant_engine, "DISABLE_THINKING", True):
+            response = ConsultantEngine(llm, FakeRetriever(CHUNKS)).consult(ConsultantRequest(question="Вопрос"))
+        self.assertTrue(llm.calls[0][0]["content"].startswith("/no_think\nТы консультант"))
         self.assertEqual(response.answer, "Да, можно.")
+        with mock.patch.object(consultant_engine, "DISABLE_THINKING", False):
+            ConsultantEngine(llm, FakeRetriever(CHUNKS)).consult(ConsultantRequest(question="Вопрос"))
+        self.assertTrue(llm.calls[1][0]["content"].startswith("Ты консультант"))
+
+
+LONG_CHUNKS = [
+    RetrievedChunk(
+        text="## Размещение\n\n-   Панели ставят на скатную кровлю с ориентацией на восток и запад. "
+        "Выработку считают с учётом региона и наклона. " + "Дополнительная деталь о размещении. " * 30,
+        source="solar.md > Станции > Размещение",
+        score=3.0,
+    ),
+    RetrievedChunk(text="## Кровля\n\nСтарая шиферная кровля требует оценки. " * 4, source="solar.md > Станции > Кровля", score=2.0),
+]
+
+
+class FlakyLLM:
+    """Падает на длинном контексте, как модель с маленьким окном."""
+
+    def __init__(self, max_chars):
+        self.max_chars = max_chars
+        self.sizes = []
+
+    def complete(self, messages):
+        size = len(messages[-1]["content"])
+        self.sizes.append(size)
+        if size > self.max_chars:
+            raise RuntimeError("HTTP 400")
+        return "Короткий ответ."
+
+
+class FixedGuide:
+    def __init__(self, chunks):
+        self.chunks = chunks
+
+    def select(self, retrieved):
+        return list(self.chunks)
+
+
+class ResilienceTests(unittest.TestCase):
+    def test_guide_sections_are_added_after_retrieved(self):
+        guide = FixedGuide([RetrievedChunk(text="Нельзя обещать сроки.", source="solar.md > Станции > Чего утверждать нельзя")])
+        llm = FakeLLM()
+        response = ConsultantEngine(llm, FakeRetriever(CHUNKS), guide=guide).consult(ConsultantRequest(question="Вопрос"))
+        final = llm.calls[0][-1]["content"]
+        self.assertLess(final.index(CHUNKS[0].text), final.index("Нельзя обещать сроки."))
+        self.assertIn("solar.md > Станции > Чего утверждать нельзя", response.sources)
+
+    def test_compact_retry_when_full_context_fails(self):
+        llm = FlakyLLM(max_chars=1500)
+        guide = FixedGuide([RetrievedChunk(text="Правило. " * 200, source="x.md > Общие границы")])
+        engine = ConsultantEngine(llm, FakeRetriever(LONG_CHUNKS), guide=guide)
+        with mock.patch.object(consultant_engine, "COMPACT_CONTEXT_CHARS", 1000):
+            response = engine.consult(ConsultantRequest(question="Вопрос"))
+        self.assertEqual(response.answer, "Короткий ответ.")
+        self.assertEqual(len(llm.sizes), 2)
+        self.assertGreater(llm.sizes[0], llm.sizes[1])
+        self.assertEqual(engine.stats["model_compact"], 1)
+
+    def test_extract_from_base_when_model_is_down(self):
+        engine = ConsultantEngine(FakeLLM(error=RuntimeError("down")), FakeRetriever(LONG_CHUNKS))
+        response = engine.consult(ConsultantRequest(question="Можно на восток и запад?"))
+        self.assertTrue(response.answer.startswith("Панели ставят на скатную кровлю"))
+        self.assertNotIn("#", response.answer)
+        self.assertIn("специалист МТС EnergyTool", response.answer)
+        self.assertLess(len(response.answer), 900)
+        self.assertEqual(engine.stats["extract"], 1)
+
+    def test_no_compact_retry_after_long_timeouts(self):
+        llm = FakeLLM(error=RuntimeError("timeout"))
+        engine = ConsultantEngine(llm, FakeRetriever(LONG_CHUNKS))
+        clock = iter([0.0, 500.0, 500.0])
+        with mock.patch.object(consultant_engine.time, "monotonic", side_effect=lambda: next(clock)):
+            response = engine.consult(ConsultantRequest(question="Вопрос"))
+        self.assertEqual(len(llm.calls), 1)
+        self.assertTrue(response.answer.startswith("Панели ставят"))
+
+    def test_local_search_covers_failed_primary(self):
+        llm = FakeLLM()
+        engine = ConsultantEngine(llm, FakeRetriever(error=RuntimeError("rag")), local_search=FakeRetriever(CHUNKS))
+        response = engine.consult(ConsultantRequest(question="Вопрос"))
+        self.assertEqual(response.answer, llm.reply)
+        self.assertIn(CHUNKS[0].text, llm.calls[0][-1]["content"])
+
+    def test_module_fallback_answer_never_builds_engine(self):
+        with mock.patch.object(consultant_engine, "_engine", None), mock.patch.object(
+            consultant_engine, "build_default_engine"
+        ) as build:
+            self.assertEqual(consultant_engine.fallback_answer(ConsultantRequest(question="Вопрос")), "")
+        build.assert_not_called()
+        engine = ConsultantEngine(FakeLLM(), None, local_search=FakeRetriever(LONG_CHUNKS))
+        with mock.patch.object(consultant_engine, "_engine", engine):
+            self.assertTrue(consultant_engine.fallback_answer(ConsultantRequest(question="Вопрос")).startswith("Панели"))
+            self.assertEqual(consultant_engine.stats()["model"], 0)
+
+    def test_dialog_topic_is_searched_separately(self):
+        class ByQuery:
+            def __init__(self):
+                self.queries = []
+
+            def retrieve(self, query, top_k=5):
+                self.queries.append(query)
+                tag = "тема" if "учёт" in query and "оценки" not in query else "реплика"
+                return [RetrievedChunk(text=f"{tag} {i}", source=f"{tag}.md > {i}", score=1.0) for i in range(3)]
+
+        retriever = ByQuery()
+        engine = ConsultantEngine(FakeLLM(), retriever, top_k=4)
+        request = ConsultantRequest(
+            question="Что нужно для оценки?",
+            history=[{"role": "user", "content": "Хотим автоматический учёт"}, {"role": "assistant", "content": "Сколько приборов?"}],
+        )
+        chunks = engine.retrieve(request)
+        self.assertEqual(len(retriever.queries), 2)
+        self.assertEqual([c.text for c in chunks], ["реплика 0", "тема 0", "реплика 1", "тема 1"])
+        retriever.queries.clear()
+        engine.retrieve(ConsultantRequest(question="Одиночный вопрос"))
+        self.assertEqual(len(retriever.queries), 1)
 
 class PromptHelpersTests(unittest.TestCase):
     def test_search_query_includes_short_question_and_history(self):
@@ -435,6 +553,47 @@ class KnowledgeBaseSearchTests(unittest.TestCase):
             self.assertIsInstance(consultant_engine.build_retriever(self.zip_path), KnowledgeBaseSearch)
         self.assertIsNone(consultant_engine.build_retriever(None))
 
+
+    def test_guide_sections_selected_by_top_files(self):
+        from kb_search import GuideSections
+
+        def chunk(source, text="текст"):
+            return RetrievedChunk(text=text, source=source)
+
+        all_chunks = [
+            chunk("a.md > A > Факты, которые можно утверждать"),
+            chunk("a.md > A > Чего утверждать нельзя"),
+            chunk("b.md > B > Что мы не делаем"),
+            chunk("c.md > C > Факты, которые можно утверждать"),
+            chunk("ref.md > Границы > Общие границы"),
+            chunk("ref.md > Границы > Когда требуется специалист"),
+            chunk("a.md > A > Описание"),
+        ]
+        guide = GuideSections(all_chunks)
+        retrieved = [chunk("a.md > A > Описание"), chunk("c.md > C > Цены"), chunk("a.md > A > Чего утверждать нельзя")]
+        sources = [c.source for c in guide.select(retrieved)]
+        # c.md встретился в выдаче один раз, это может быть случайность, его правила не берём.
+        self.assertEqual(
+            sources,
+            [
+                "a.md > A > Факты, которые можно утверждать",
+                "ref.md > Границы > Общие границы",
+                "ref.md > Границы > Когда требуется специалист",
+            ],
+        )
+        retrieved.append(chunk("c.md > C > Сроки"))
+        self.assertIn("c.md > C > Факты, которые можно утверждать", [c.source for c in guide.select(retrieved)])
+        self.assertEqual([c.source for c in guide.select([])][0], "ref.md > Границы > Общие границы")
+
+    def test_default_engine_has_local_search_and_guide(self):
+        env = {"DATA_DIR": str(self.root), "LLM_BASE_URL": "http://proxy", "LLM_API_KEY": "k", "LLM_MODEL": "m"}
+        with mock.patch.dict(os.environ, env, clear=False), contextlib.redirect_stderr(io.StringIO()):
+            engine = consultant_engine.build_default_engine()
+        self.assertIsInstance(engine._local_search, KnowledgeBaseSearch)
+        self.assertIsNotNone(engine._guide)
+        self.assertEqual(engine.llm._timeout, 90.0)
+        answer = engine.fallback_answer(ConsultantRequest(question="Старая шиферная крыша подойдёт под панели?"))
+        self.assertEqual(answer, "")  # в тестовой базе разделы короче 80 символов
 
     def test_engine_settings_ignore_small_platform_values(self):
         env = {

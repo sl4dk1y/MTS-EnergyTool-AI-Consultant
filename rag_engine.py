@@ -63,6 +63,57 @@ OVERLAP_CHARS = 480
 
 EMBED_BATCH_SIZE = 32
 
+# Сетевые лимиты. На весь конкурсный запуск есть 20 минут, поэтому зависший
+# сервис эмбеддингов или реранкера не должен съедать десятки секунд на вопрос.
+INDEX_EMBED_TIMEOUT = 20.0
+INDEX_EMBED_BUDGET = 90.0
+QUERY_EMBED_TIMEOUT = 10.0
+RERANK_TIMEOUT = 10.0
+# После стольких отказов подряд канал отключается до конца запуска.
+BREAKER_LIMIT = 3
+
+
+class _Breaker:
+    """Отключает сетевой канал после нескольких отказов подряд."""
+
+    def __init__(self, name: str, limit: int = BREAKER_LIMIT) -> None:
+        self._name = name
+        self._limit = limit
+        self._failures = 0
+        self._lock = threading.Lock()
+
+    def is_open(self) -> bool:
+        return self._failures >= self._limit
+
+    def record(self, ok: bool) -> None:
+        with self._lock:
+            if ok:
+                self._failures = 0
+                return
+            self._failures += 1
+            if self._failures == self._limit:
+                _log(f"{self._name}: {self._limit} отказа подряд, канал отключён до конца запуска")
+
+    def reset(self) -> None:
+        with self._lock:
+            self._failures = 0
+
+
+def _index_text(source: str, text: str) -> str:
+    """Текст для эмбеддингов и реранкера: названия документа и разделов плюс фрагмент.
+
+    Раздел вроде «Можно ли расширить» сам не содержит названия продукта, и без
+    заголовков смысловое сравнение не связывает его с вопросом про этот продукт.
+    """
+    headings = source.split(" > ")[1:]
+    return (" > ".join(headings) + "\n" + text) if headings else text
+
+
+def _compact_query(query: str) -> str:
+    """Запрос без повторов строк. Движок дублирует вопрос ради веса в BM25,
+    а эмбеддингам и реранкеру повтор только мешает."""
+    return "\n".join(dict.fromkeys(line.strip() for line in query.splitlines() if line.strip()))
+
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 _TOKEN_RE = re.compile(r"[0-9a-zа-яё]+")
 _SPLIT_PARAGRAPHS_RE = re.compile(r"\n\s*\n")
@@ -429,14 +480,23 @@ def _validate_vectors(vectors: Sequence[Sequence[float]]) -> int:
     return dimension
 
 
-def _embed_texts(texts: Sequence[str], timeout: float = 30.0) -> List[List[float]]:
+def _embed_texts(
+    texts: Sequence[str],
+    timeout: float = 30.0,
+    attempts: int = 3,
+    budget: Optional[float] = None,
+) -> List[List[float]]:
+    """budget ограничивает общее время на все батчи, None снимает ограничение."""
     model = os.environ.get("EMB_MODEL")
     if not model:
         raise RuntimeError("EMB_MODEL не задан")
+    started = time.monotonic()
     vectors: List[List[float]] = []
     for start in range(0, len(texts), EMBED_BATCH_SIZE):
+        if budget is not None and time.monotonic() - started > budget:
+            raise RuntimeError("эмбеддинги не уложились в отведённое время")
         batch = list(texts[start : start + EMBED_BATCH_SIZE])
-        payload = _post_json("/embeddings", {"model": model, "input": batch}, timeout)
+        payload = _post_json("/embeddings", {"model": model, "input": batch}, timeout, attempts=attempts)
         data = payload.get("data") or []
         if len(data) != len(batch):
             raise RuntimeError("прокси вернул неверное число векторов")
@@ -447,21 +507,34 @@ def _embed_texts(texts: Sequence[str], timeout: float = 30.0) -> List[List[float
     return vectors
 
 
-def _rerank(query: str, documents: Sequence[str], timeout: float = 20.0) -> Optional[List[float]]:
+_RERANK_BREAKER = _Breaker("реранкер")
+_DENSE_BREAKER = _Breaker("векторный канал")
+
+
+def _rerank(query: str, documents: Sequence[str], timeout: float = RERANK_TIMEOUT) -> Optional[List[float]]:
+    scores = _rerank_scores(query, documents, timeout)
+    if os.environ.get("RERANKER_MODEL") and documents:
+        _RERANK_BREAKER.record(scores is not None)
+    return scores
+
+
+def _rerank_scores(query: str, documents: Sequence[str], timeout: float) -> Optional[List[float]]:
     """Скоры реранкера в порядке documents. None, если ответ невалиден.
 
     Неполный или битый ответ отбрасывается целиком: подставлять пропущенным
     документам нейтральный скор нельзя, иначе они обгонят реальные результаты.
     """
     model = os.environ.get("RERANKER_MODEL")
-    if not model:
+    if not model or not documents or _RERANK_BREAKER.is_open():
         return None
     try:
         payload = _post_json(
             "/rerank",
-            {"model": model, "query": query, "documents": list(documents)},
+            # top_n нужен явно: часть серверов без него возвращает только несколько
+            # лучших документов, и такой неполный ответ пришлось бы отбросить.
+            {"model": model, "query": query, "documents": list(documents), "top_n": len(documents)},
             timeout,
-            attempts=2,
+            attempts=1,
         )
     except Exception as exc:
         _log(f"реранкер недоступен: {type(exc).__name__}")
@@ -584,6 +657,7 @@ class RagRetriever:
         self._lock = threading.Lock()
         self._ready = False
         self._chunks: List[Tuple[str, str]] = []
+        self._index_texts: List[str] = []
         self._bm25: Optional[_BM25] = None
         self._dense: Optional[_DenseIndex] = None
 
@@ -624,11 +698,20 @@ class RagRetriever:
             _log("в базе знаний нет текстовых файлов")
             return
         self._chunks = chunks
+        index_texts = [_index_text(source, text) for source, text in chunks]
+        self._index_texts = index_texts
+        # BM25 строится по исходному тексту: с заголовками замер на демо-вопросах
+        # лучше не стал. Заголовки идут только в эмбеддинги и реранкер.
         self._bm25 = _BM25([_tokenize(text) for _, text in chunks])
         dense: Optional[_DenseIndex] = None
         if self._use_dense:
             try:
-                vectors = _embed_texts([text for _, text in chunks])
+                vectors = _embed_texts(
+                    index_texts,
+                    timeout=INDEX_EMBED_TIMEOUT,
+                    attempts=2,
+                    budget=INDEX_EMBED_BUDGET,
+                )
                 dense = _DenseIndex(vectors)
                 _log(f"эмбеддинги получены: {len(vectors)} векторов")
             except Exception as exc:
@@ -672,10 +755,12 @@ class RagRetriever:
         tokens = _tokenize(query)
         lexical = self._bm25.search(tokens, CANDIDATES_PER_CHANNEL)
         vectors: List[Tuple[int, float]] = []
-        if self._dense is not None:
+        if self._dense is not None and not _DENSE_BREAKER.is_open():
             try:
-                vectors = self._dense.search(self._query_vector(query), CANDIDATES_PER_CHANNEL)
+                vectors = self._dense.search(self._query_vector(_compact_query(query)), CANDIDATES_PER_CHANNEL)
+                _DENSE_BREAKER.record(True)
             except Exception as exc:
+                _DENSE_BREAKER.record(False)
                 # Таймаут или ошибка эмбеддингов не должны обнулять выдачу:
                 # результаты BM25 уже получены и остаются валидными.
                 _log(f"векторный канал недоступен, остаёмся на BM25: {type(exc).__name__}")
@@ -706,7 +791,7 @@ class RagRetriever:
         candidates = sorted(fused.items(), key=lambda item: item[1], reverse=True)
         head = candidates[:RERANK_CANDIDATES]
         # Реранкер сам вернёт None, если RERANKER_MODEL не задан.
-        scores = _rerank(query, [self._chunks[index][1] for index, _ in head])
+        scores = _rerank(_compact_query(query), [self._index_texts[index] for index, _ in head])
         if scores is None:
             return [(index, score) for index, score in candidates]
         # Логиты реранкера приводятся к (0, 1): движок может включить
@@ -718,7 +803,7 @@ class RagRetriever:
 
     def _query_vector(self, query: str) -> List[float]:
         assert self._dense is not None
-        vectors = _embed_texts([query])
+        vectors = _embed_texts([query], timeout=QUERY_EMBED_TIMEOUT, attempts=2)
         return vectors[0]
 
 
