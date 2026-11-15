@@ -294,7 +294,11 @@ class ResilienceTests(unittest.TestCase):
         self.assertEqual(len(retriever.queries), 1)
 
     def test_prompt_version_switch(self):
-        self.assertIn(consultant_engine.SYSTEM_PROMPT, (consultant_engine.SYSTEM_PROMPT_V1, consultant_engine.SYSTEM_PROMPT_V2))
+        self.assertIn(
+            consultant_engine.SYSTEM_PROMPT,
+            (consultant_engine.SYSTEM_PROMPT_V1, consultant_engine.SYSTEM_PROMPT_V2, consultant_engine.SYSTEM_PROMPT_V3),
+        )
+        self.assertIn("Только если в базе совсем нет сведений", consultant_engine.SYSTEM_PROMPT_V3)
         self.assertIn("Опирайся только на сведения", consultant_engine.SYSTEM_PROMPT_V1)
         self.assertIn("Факты, которые можно утверждать", consultant_engine.SYSTEM_PROMPT_V2)
 
