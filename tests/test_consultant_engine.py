@@ -253,6 +253,29 @@ class ResilienceTests(unittest.TestCase):
         self.assertEqual(retry.calls[0][-1]["content"], main.calls[0][-1]["content"])
         self.assertEqual(engine.stats["model"], 1)
 
+    def test_full_kb_falls_back_to_standard_context(self):
+        class LongContextRejects:
+            def __init__(self):
+                self.sizes = []
+
+            def complete(self, messages):
+                size = len(messages[-1]["content"])
+                self.sizes.append(size)
+                if size > 3000:
+                    raise RuntimeError("HTTP 400 context length")
+                return "Ответ по обычному контексту."
+
+        kb = FakeRetriever(LONG_CHUNKS + [RetrievedChunk(text="Раздел базы. " * 300, source="other.md > Раздел")])
+        kb.chunks = kb.chunks  # список всех разделов, как у KnowledgeBaseSearch
+        llm = LongContextRejects()
+        with mock.patch.object(consultant_engine, "FULL_KB_CONTEXT", True):
+            engine = ConsultantEngine(llm, FakeRetriever(CHUNKS), local_search=kb)
+            response = engine.consult(ConsultantRequest(question="Вопрос"))
+        self.assertEqual(response.answer, "Ответ по обычному контексту.")
+        self.assertEqual(len(llm.sizes), 2)
+        self.assertGreater(llm.sizes[0], 3000)
+        self.assertLess(llm.sizes[1], 3000)
+
     def test_no_compact_retry_after_long_timeouts(self):
         llm = FakeLLM(error=RuntimeError("timeout"))
         engine = ConsultantEngine(llm, FakeRetriever(LONG_CHUNKS))

@@ -153,6 +153,13 @@ SYSTEM_PROMPT_V2 = """Ты консультант МТС EnergyTool на сай�
 # платформе, поэтому эффект каждого изменения проверяется отдельной попыткой.
 # Результаты на public: версия 1 дала 0.621 (submission_2), версия 4 с лимитом 6000 дала 0.633 (submission_4).
 PROMPT_VERSION = 4
+# Передавать модели всю базу знаний целиком: сначала найденные поиском разделы,
+# затем все остальные. База небольшая (около 130 тысяч символов), окно модели больше.
+# На стенде с конкурсной моделью: 8.89 против 8.67 на демо-вопросах и 9.07 против 8.60
+# на сложных. Если прокси не примет такой длинный запрос, движок откатится на обычный
+# контекст, как в submission_4.
+FULL_KB_CONTEXT = True
+FULL_KB_CONTEXT_CHARS = 400_000
 # Добавлять к контексту разделы базы с её правилами (что можно утверждать и т. п.).
 USE_GUIDE_SECTIONS = False
 SYSTEM_PROMPT = {1: SYSTEM_PROMPT_V1, 2: SYSTEM_PROMPT_V2, 3: SYSTEM_PROMPT_V3, 4: SYSTEM_PROMPT_V4}[PROMPT_VERSION]
@@ -447,8 +454,21 @@ class ConsultantEngine:
             chunks = self._search(self._local_search, request)
         return filter_by_relative_score(chunks, self._relative_cutoff)
 
-    def context_chunks(self, retrieved: Sequence[RetrievedChunk]) -> list[RetrievedChunk]:
-        """Найденные фрагменты в пределах бюджета и разделы с правилами базы к ним."""
+    def full_kb_chunks(self, retrieved: Sequence[RetrievedChunk]) -> list[RetrievedChunk]:
+        """Вся база: сначала найденные разделы по порядку релевантности, потом остальные."""
+        all_chunks = getattr(self._local_search, "chunks", None) or []
+        head = fit_chunks(retrieved, MAX_CONTEXT_CHARS)
+        seen = {(c.source, c.text[:80]) for c in head}
+        rest = [c for c in all_chunks if (c.source, c.text[:80]) not in seen]
+        return fit_chunks(head + rest, FULL_KB_CONTEXT_CHARS)
+
+    def context_chunks(self, retrieved: Sequence[RetrievedChunk], full: bool = True) -> list[RetrievedChunk]:
+        """Найденные фрагменты в пределах бюджета и разделы с правилами базы к ним.
+
+        Если включена вся база и full=True, возвращается вся база целиком.
+        """
+        if full and FULL_KB_CONTEXT and self._local_search is not None:
+            return self.full_kb_chunks(retrieved)
         main = fit_chunks(retrieved, MAX_CONTEXT_CHARS)
         if self._guide is None:
             return main
@@ -482,15 +502,22 @@ class ConsultantEngine:
             # характеристики продуктов из общих знаний.
             self._count("no_context")
             return ConsultantResponse(answer=NO_CONTEXT_ANSWER, sources=[])
-        context = self.context_chunks(retrieved)
         started = time.monotonic()
-        answer = self._ask(request, context, MAX_CONTEXT_CHARS + GUIDE_CONTEXT_CHARS)
-        if answer:
-            self._count("model")
-            return ConsultantResponse(answer=answer, sources=unique_sources(context))
-        if self._retry_llm is not self._llm:
-            # Прокси мог не принять большой max_tokens. Тот же контекст с лимитом платформы.
-            answer = self._ask(request, context, MAX_CONTEXT_CHARS + GUIDE_CONTEXT_CHARS, self._retry_llm)
+        standard_limit = MAX_CONTEXT_CHARS + GUIDE_CONTEXT_CHARS
+        standard = self.context_chunks(retrieved, full=False)
+        full_kb = FULL_KB_CONTEXT and self._local_search is not None
+        # Лесенка попыток: вся база (если включена), обычный контекст, затем короткий.
+        attempts = []
+        if full_kb:
+            attempts.append((self.full_kb_chunks(retrieved), FULL_KB_CONTEXT_CHARS, self._llm))
+            # Прокси мог не принять длинный запрос или большой max_tokens.
+            attempts.append((standard, standard_limit, self._retry_llm))
+        else:
+            attempts.append((standard, standard_limit, self._llm))
+            if self._retry_llm is not self._llm:
+                attempts.append((standard, standard_limit, self._retry_llm))
+        for context, limit, model in attempts:
+            answer = self._ask(request, context, limit, model)
             if answer:
                 self._count("model")
                 return ConsultantResponse(answer=answer, sources=unique_sources(context))
