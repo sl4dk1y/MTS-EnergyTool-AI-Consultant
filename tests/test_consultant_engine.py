@@ -243,6 +243,16 @@ class ResilienceTests(unittest.TestCase):
         self.assertLess(len(response.answer), 900)
         self.assertEqual(engine.stats["extract"], 1)
 
+    def test_retry_model_gets_full_context_before_compact(self):
+        main = FakeLLM(error=RuntimeError("HTTP 400"))
+        retry = FakeLLM(reply="Ответ с лимитом платформы.")
+        engine = ConsultantEngine(main, FakeRetriever(LONG_CHUNKS), retry_llm=retry)
+        response = engine.consult(ConsultantRequest(question="Вопрос"))
+        self.assertEqual(response.answer, "Ответ с лимитом платформы.")
+        self.assertEqual(len(retry.calls), 1)
+        self.assertEqual(retry.calls[0][-1]["content"], main.calls[0][-1]["content"])
+        self.assertEqual(engine.stats["model"], 1)
+
     def test_no_compact_retry_after_long_timeouts(self):
         llm = FakeLLM(error=RuntimeError("timeout"))
         engine = ConsultantEngine(llm, FakeRetriever(LONG_CHUNKS))

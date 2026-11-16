@@ -218,6 +218,11 @@ class AdapterTests(unittest.TestCase):
             run_adapter(self.input_path, self.output_path, consult, fallback=fallback)
         self.assertEqual(self.read_output(), {"1": FALLBACK_ANSWER})
 
+    def test_other_role_labels_are_parsed(self):
+        request = parse_question("Клиент: Нужен учёт\nКонсультант: Сколько приборов?\nКлиент: Сорок")
+        self.assertEqual(request.question, "Сорок")
+        self.assertEqual([turn["role"] for turn in request.history], ["user", "assistant"])
+
     def test_missing_engine_is_explicit(self):
         env = dict(os.environ)
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])

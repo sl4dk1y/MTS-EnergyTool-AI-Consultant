@@ -18,7 +18,9 @@ from consultant_contracts import ConsultantRequest, ConsultantResponse
 START_TIME = time.monotonic()
 MAX_ANSWER_CHARS = 10_000
 DEFAULT_MAX_WORKERS = 4
-MAX_WORKERS_LIMIT = 32
+# Как у учебного примера организаторов. На каждый вопрос уходит 3-4 запроса в прокси
+# (эмбеддинги, реранкер, модель), больше 8 потоков легко упираются в его лимиты.
+MAX_WORKERS_LIMIT = 8
 # Платформа даёт 20 минут на запуск. Оставляем запас на загрузку и запись CSV.
 DEFAULT_TIME_BUDGET_SECONDS = 17 * 60
 TIMEOUT_ANSWER = (
@@ -28,7 +30,17 @@ TIMEOUT_ANSWER = (
 )
 # Тот же нейтральный ответ при сбое движка на отдельном вопросе.
 FALLBACK_ANSWER = TIMEOUT_ANSWER
-ROLE_LABELS = {"пользователь": "user", "ассистент": "assistant"}
+# Подписи ролей в вопросах с историей. В демо «Пользователь» и «Ассистент»,
+# остальные варианты на случай другого оформления в скрытом наборе.
+ROLE_LABELS = {
+    "пользователь": "user",
+    "клиент": "user",
+    "user": "user",
+    "ассистент": "assistant",
+    "консультант": "assistant",
+    "бот": "assistant",
+    "assistant": "assistant",
+}
 
 
 class InputFormatError(ValueError):

@@ -38,11 +38,17 @@ RELATIVE_SCORE_CUTOFF = 0.0
 # Как у учебного примера организаторов. При 40 с медленные ответы модели
 # обрывались и заменялись заглушкой.
 LLM_TIMEOUT_SECONDS = 90
-LLM_MAX_ATTEMPTS = 2
-# Нижняя граница max_tokens. Конкурсная модель рассуждает перед ответом, и на части
-# вопросов рассуждения съедали все 2048 токенов: ответ приходил пустым и уходил на
-# повтор с урезанным контекстом. С 6000 таких случаев на стенде нет.
-MIN_MAX_TOKENS = 6000
+# Повторы при 429, 5xx и таймаутах. Регламент прямо советует повторять с паузой.
+# Раньше было 2 попытки с паузой 0.25 с: при перегрузке прокси вопрос сразу уходил
+# в запасной ответ, а на стенде без лимитов это было не видно.
+LLM_MAX_ATTEMPTS = 5
+LLM_BACKOFF_SECONDS = 2.0
+# Нижняя граница max_tokens. Конкурсная модель рассуждает перед ответом, и при 2048
+# на части вопросов рассуждения съедали весь лимит, ответ приходил пустым.
+MIN_MAX_TOKENS = 4096
+# Повтор с коротким контекстом идёт с лимитом платформы (не меньше 2048, как в
+# submission_2): если прокси не принимает большой max_tokens, второй запрос пройдёт.
+RETRY_MIN_MAX_TOKENS = 2048
 EXTRACT_CHARS = 600
 # Отключение рассуждений Qwen3 командой /no_think в системном сообщении.
 # Локально эффект проверить нельзя, прокси с моделью есть только на платформе,
@@ -145,7 +151,7 @@ SYSTEM_PROMPT_V2 = """Ты консультант МТС EnergyTool на сай�
 # Переключатели вариантов для сравнения сабмитами. Модель доступна только на
 # платформе, поэтому эффект каждого изменения проверяется отдельной попыткой.
 # Результаты на public: версия 1 дала 0.621 (submission_2).
-PROMPT_VERSION = 4
+PROMPT_VERSION = 1
 # Добавлять к контексту разделы базы с её правилами (что можно утверждать и т. п.).
 USE_GUIDE_SECTIONS = False
 SYSTEM_PROMPT = {1: SYSTEM_PROMPT_V1, 2: SYSTEM_PROMPT_V2, 3: SYSTEM_PROMPT_V3, 4: SYSTEM_PROMPT_V4}[PROMPT_VERSION]
@@ -371,8 +377,11 @@ class ConsultantEngine:
         collect_contacts: bool = False,
         local_search: Optional[Retriever] = None,
         guide: Optional[GuideSelector] = None,
+        retry_llm: Optional[ChatModel] = None,
     ) -> None:
         self._llm = llm
+        # Модель для повтора с коротким контекстом, по умолчанию та же.
+        self._retry_llm = retry_llm or llm
         self._retriever = retriever
         self._top_k = top_k
         self._relative_cutoff = relative_cutoff
@@ -448,9 +457,16 @@ class ConsultantEngine:
             guide = []
         return main + guide
 
-    def _ask(self, request: ConsultantRequest, chunks: Sequence[RetrievedChunk], limit: int) -> str:
+    def _ask(
+        self,
+        request: ConsultantRequest,
+        chunks: Sequence[RetrievedChunk],
+        limit: int,
+        llm: Optional[ChatModel] = None,
+    ) -> str:
         try:
-            return clean_answer(self._llm.complete(build_messages(request, chunks, self._system_prompt, limit)))
+            model = llm or self._llm
+            return clean_answer(model.complete(build_messages(request, chunks, self._system_prompt, limit)))
         except Exception:
             return ""
 
@@ -471,9 +487,15 @@ class ConsultantEngine:
         if answer:
             self._count("model")
             return ConsultantResponse(answer=answer, sources=unique_sources(context))
+        if self._retry_llm is not self._llm:
+            # Прокси мог не принять большой max_tokens. Тот же контекст с лимитом платформы.
+            answer = self._ask(request, context, MAX_CONTEXT_CHARS + GUIDE_CONTEXT_CHARS, self._retry_llm)
+            if answer:
+                self._count("model")
+                return ConsultantResponse(answer=answer, sources=unique_sources(context))
         if time.monotonic() - started < COMPACT_RETRY_WINDOW_SECONDS:
             compact = fit_chunks(retrieved[:COMPACT_TOP_K], COMPACT_CONTEXT_CHARS)
-            answer = self._ask(request, compact, COMPACT_CONTEXT_CHARS)
+            answer = self._ask(request, compact, COMPACT_CONTEXT_CHARS, self._retry_llm)
             if answer:
                 self._count("model_compact")
                 return ConsultantResponse(answer=answer, sources=unique_sources(compact))
@@ -555,11 +577,14 @@ def build_default_engine(collect_contacts: bool = False) -> ConsultantEngine:
         )
     else:
         print(f"[engine] база знаний {kb_path}, поиск {type(retriever).__name__}", file=sys.stderr)
-    llm = LLMClient.from_env(
+    platform_max_tokens = _int_env("MAX_TOKENS", 2048)
+    common = dict(
         timeout=float(_int_env("LLM_TIMEOUT_SECONDS", LLM_TIMEOUT_SECONDS)),
         max_attempts=LLM_MAX_ATTEMPTS,
-        max_tokens=max(_int_env("MAX_TOKENS", 2048), MIN_MAX_TOKENS),
+        backoff_seconds=LLM_BACKOFF_SECONDS,
     )
+    llm = LLMClient.from_env(max_tokens=max(platform_max_tokens, MIN_MAX_TOKENS), **common)
+    retry_llm = LLMClient.from_env(max_tokens=max(platform_max_tokens, RETRY_MIN_MAX_TOKENS), **common)
     return ConsultantEngine(
         llm,
         retriever,
@@ -568,6 +593,7 @@ def build_default_engine(collect_contacts: bool = False) -> ConsultantEngine:
         collect_contacts=collect_contacts,
         local_search=local_search,
         guide=guide,
+        retry_llm=retry_llm,
     )
 
 
