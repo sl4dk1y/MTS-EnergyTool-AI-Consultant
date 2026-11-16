@@ -151,6 +151,10 @@ class KnowledgeBaseSearch:
     def __len__(self) -> int:
         return len(self._chunks)
 
+    @property
+    def chunks(self) -> list[RetrievedChunk]:
+        return list(self._chunks)
+
     def retrieve(self, query: str, top_k: int = 5) -> list[RetrievedChunk]:
         query_terms = Counter(tokenize(query))
         if not query_terms or not self._chunks or top_k <= 0:
@@ -171,6 +175,57 @@ class KnowledgeBaseSearch:
             chunk = self._chunks[index]
             result.append(RetrievedChunk(text=chunk.text, source=chunk.source, score=round(score, 4)))
         return result
+
+
+# Разделы базы, где собраны её собственные правила ответа: что можно утверждать,
+# чего нельзя, что компания не делает и когда нужен специалист. Поиск по словам
+# вопроса находит их редко, а для точного и честного ответа они нужны почти всегда.
+_GENERAL_GUIDE_RE = re.compile(r"общие границы|когда требуется специалист", re.IGNORECASE)
+_PRODUCT_GUIDE_RE = re.compile(
+    r"факты, которые можно утверждать|чего утверждать нельзя|что мы не делаем", re.IGNORECASE
+)
+
+
+def _file_of(source: str) -> str:
+    return source.split(" > ", 1)[0]
+
+
+def _headings_of(source: str) -> str:
+    parts = source.split(" > ", 1)
+    return parts[1] if len(parts) > 1 else ""
+
+
+class GuideSections:
+    """Подбирает разделы с правилами базы к уже найденным фрагментам."""
+
+    def __init__(self, chunks: Iterable[RetrievedChunk]) -> None:
+        self._general: list[RetrievedChunk] = []
+        self._by_file: dict[str, list[RetrievedChunk]] = {}
+        for chunk in chunks:
+            headings = _headings_of(chunk.source)
+            if _PRODUCT_GUIDE_RE.search(headings):
+                self._by_file.setdefault(_file_of(chunk.source), []).append(chunk)
+            elif _GENERAL_GUIDE_RE.search(headings):
+                self._general.append(chunk)
+
+    def select(self, retrieved: Iterable[RetrievedChunk], max_files: int = 2, scan: int = 10) -> list[RetrievedChunk]:
+        """Правила тех документов, которые чаще всего встречаются в начале выдачи, и общие."""
+        retrieved = list(retrieved)
+        counts: dict[str, int] = {}
+        for chunk in retrieved[:scan]:
+            file = _file_of(chunk.source)
+            if file in self._by_file:
+                counts[file] = counts.get(file, 0) + 1
+        # dict хранит порядок вставки, поэтому при равном счёте выигрывает более ранний файл.
+        ranked = sorted(counts, key=lambda name: -counts[name])
+        # Второй документ берём, только если он представлен в выдаче не случайным фрагментом.
+        files = ranked[:1] + [name for name in ranked[1:max_files] if counts[name] >= 2]
+        selected: list[RetrievedChunk] = []
+        for file in files:
+            selected.extend(self._by_file[file])
+        selected.extend(self._general)
+        already = {chunk.source for chunk in retrieved}
+        return [RetrievedChunk(text=c.text, source=c.source) for c in selected if c.source not in already]
 
 
 KB_ARCHIVE_NAMES = ("knowledge-base.zip", "knowledge_base.zip", "kb.zip")

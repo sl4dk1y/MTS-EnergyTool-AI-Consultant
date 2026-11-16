@@ -18,7 +18,9 @@ from consultant_contracts import ConsultantRequest, ConsultantResponse
 START_TIME = time.monotonic()
 MAX_ANSWER_CHARS = 10_000
 DEFAULT_MAX_WORKERS = 4
-MAX_WORKERS_LIMIT = 32
+# Как у учебного примера организаторов. На каждый вопрос уходит 3-4 запроса в прокси
+# (эмбеддинги, реранкер, модель), больше 8 потоков легко упираются в его лимиты.
+MAX_WORKERS_LIMIT = 8
 # Платформа даёт 20 минут на запуск. Оставляем запас на загрузку и запись CSV.
 DEFAULT_TIME_BUDGET_SECONDS = 17 * 60
 TIMEOUT_ANSWER = (
@@ -28,7 +30,17 @@ TIMEOUT_ANSWER = (
 )
 # Тот же нейтральный ответ при сбое движка на отдельном вопросе.
 FALLBACK_ANSWER = TIMEOUT_ANSWER
-ROLE_LABELS = {"пользователь": "user", "ассистент": "assistant"}
+# Подписи ролей в вопросах с историей. В демо «Пользователь» и «Ассистент»,
+# остальные варианты на случай другого оформления в скрытом наборе.
+ROLE_LABELS = {
+    "пользователь": "user",
+    "клиент": "user",
+    "user": "user",
+    "ассистент": "assistant",
+    "консультант": "assistant",
+    "бот": "assistant",
+    "assistant": "assistant",
+}
 
 
 class InputFormatError(ValueError):
@@ -185,22 +197,43 @@ def run_adapter(
     consult: Callable[[ConsultantRequest], ConsultantResponse],
     max_workers: int = 1,
     deadline: Optional[float] = None,
+    fallback: Optional[Callable[[ConsultantRequest], str]] = None,
 ) -> int:
-    """deadline задаётся в единицах time.monotonic()."""
+    """deadline задаётся в единицах time.monotonic().
+
+    fallback даёт быстрый ответ без модели для вопросов, где основной путь
+    не сработал или не успел. Если его нет, пишется общий запасной текст.
+    """
     questions = read_questions(questions_path)
     requests = [parse_question(raw_question) for _, raw_question in questions]
     outcomes = _consult_all(requests, consult, max_workers, deadline)
     results: list[tuple[str, str]] = []
-    for row_number, ((item_id, _), outcome) in enumerate(zip(questions, outcomes), start=2):
+    replaced = 0
+    for row_number, ((item_id, _), outcome, request) in enumerate(zip(questions, outcomes, requests), start=2):
         answer, problem = _answer_from_outcome(outcome)
         if problem:
+            replaced += 1
+            answer = _quick_answer(fallback, request) or answer
             # Один сбой не должен оставить весь запуск без submission.csv.
             # Печатаем только номер строки и тип проблемы, без текста исключения,
             # в нём могут оказаться URL, заголовки или фрагмент запроса.
             print(f"Строка {row_number}: {problem}, записан запасной ответ", file=sys.stderr)
         results.append((item_id, answer))
     write_submission(output_path, results)
+    if replaced:
+        print(f"Запасных ответов: {replaced} из {len(results)}", file=sys.stderr)
     return len(results)
+
+
+def _quick_answer(fallback: Optional[Callable[[ConsultantRequest], str]], request: ConsultantRequest) -> str:
+    if fallback is None:
+        return ""
+    try:
+        answer = fallback(request)
+    except Exception:
+        return ""
+    answer = answer.strip() if isinstance(answer, str) else ""
+    return answer[:MAX_ANSWER_CHARS]
 
 
 def _answer_from_outcome(outcome: Optional[Outcome]) -> tuple[str, str]:
@@ -245,6 +278,27 @@ def _load_engine() -> Callable[[ConsultantRequest], ConsultantResponse]:
     return consult
 
 
+def _engine_extras() -> tuple[Optional[Callable[[ConsultantRequest], str]], Callable[[], dict]]:
+    """Необязательные функции движка: быстрый ответ из базы и счётчики."""
+    try:
+        module = importlib.import_module("consultant_engine")
+    except ImportError:
+        return None, dict
+    fallback = getattr(module, "fallback_answer", None)
+    stats = getattr(module, "stats", None)
+    return (fallback if callable(fallback) else None), (stats if callable(stats) else dict)
+
+
+def _find_first(data_dir: Path, names: Iterable[str]) -> Path:
+    last_error: Optional[FileNotFoundError] = None
+    for name in names:
+        try:
+            return _find_input(data_dir, name)
+        except FileNotFoundError as exc:
+            last_error = exc
+    raise last_error or FileNotFoundError("Не найден входной файл")
+
+
 def _positive_env(name: str, default: float) -> float:
     try:
         value = float(os.environ.get(name, ""))
@@ -255,16 +309,27 @@ def _positive_env(name: str, default: float) -> float:
 
 def main() -> None:
     data_dir = Path(os.environ.get("DATA_DIR", "data"))
-    questions_path = _find_input(data_dir, "questions.csv")
-    # Проверяем, что платформа передала базу, но не читаем её здесь: загрузка и
-    # поиск принадлежат подключённому RAG/Consultant Engine.
-    _find_input(data_dir, "knowledge-base.zip")
+    # Регламент называет файл questions.csv, учебный пример принимает и train.csv.
+    questions_path = _find_first(data_dir, ("questions.csv", "train.csv"))
+    # Базу знаний ищет сам Consultant Engine, он понимает разные имена архива.
     max_workers = min(MAX_WORKERS_LIMIT, int(_positive_env("MAX_WORKERS", DEFAULT_MAX_WORKERS)))
     deadline = START_TIME + _positive_env("TIME_BUDGET_SECONDS", DEFAULT_TIME_BUDGET_SECONDS)
+    consult = _load_engine()
+    fallback, stats = _engine_extras()
     count = run_adapter(
-        questions_path, Path("submission.csv"), _load_engine(), max_workers=max_workers, deadline=deadline
+        questions_path,
+        Path("submission.csv"),
+        consult,
+        max_workers=max_workers,
+        deadline=deadline,
+        fallback=fallback,
     )
-    print(f"Создан submission.csv: {count} ответов, потоков {max_workers}")
+    elapsed = round(time.monotonic() - START_TIME)
+    print(f"Создан submission.csv: {count} ответов, потоков {max_workers}, {elapsed} с")
+    try:
+        print(f"Пути ответов: {stats()}", file=sys.stderr)
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

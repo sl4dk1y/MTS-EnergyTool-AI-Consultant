@@ -114,6 +114,9 @@ class ChunkingTests(unittest.TestCase):
 
 class RetrievalTests(unittest.TestCase):
     def setUp(self) -> None:
+        # Предохранители общие на модуль, отказы одного теста не должны влиять на другой.
+        rag_engine._RERANK_BREAKER.reset()
+        rag_engine._DENSE_BREAKER.reset()
         self._tmp = tempfile.TemporaryDirectory()
         self.kb_root = Path(self._tmp.name)
         _write_kb(self.kb_root)
@@ -166,7 +169,7 @@ class RetrievalTests(unittest.TestCase):
     def test_bm25_fallback_when_dense_search_fails(self) -> None:
         """Ошибка векторного поиска не обнуляет выдачу: остаются результаты BM25."""
         with mock.patch.object(
-            rag_engine, "_embed_texts", side_effect=lambda texts: [[0.5, 0.5] for _ in texts]
+            rag_engine, "_embed_texts", side_effect=lambda texts, **_: [[0.5, 0.5] for _ in texts]
         ):
             retriever = RagRetriever(self.kb_root, use_dense=True)
             retriever.retrieve("прогрев", top_k=1)
@@ -178,7 +181,7 @@ class RetrievalTests(unittest.TestCase):
     def test_dense_low_similarity_is_filtered(self) -> None:
         """Фрагменты с косинусом ниже порога не добавляются к выдаче."""
 
-        def fake_embed(texts):
+        def fake_embed(texts, **_):
             # Документы получают [1, 0], запрос — [0, 1]: косинус 0 ниже порога.
             if len(texts) == 1:
                 return [[0.0, 1.0]]
@@ -192,7 +195,7 @@ class RetrievalTests(unittest.TestCase):
         self.assertLess(rag_engine.DENSE_MIN_SIMILARITY, 1.0)
 
     def test_reranker_scores_are_positive(self) -> None:
-        def fake_embed(texts):
+        def fake_embed(texts, **_):
             # Разные векторы для запроса и документов: длина вектора 4.
             return [[1.0, 0.0, 0.0, 0.0] if index % 2 == 0 else [0.0, 1.0, 0.0, 0.0] for index in range(len(texts))]
 
@@ -352,6 +355,41 @@ class RetrievalTests(unittest.TestCase):
         self.assertEqual(len(calls), 1, "индекс должен строиться один раз")
         self.assertTrue(all(results))
 
+
+    def test_rerank_breaker_stops_calls_after_failures(self) -> None:
+        calls = []
+
+        def failing(path, payload, timeout, attempts=3):
+            calls.append(path)
+            raise RuntimeError("таймаут")
+
+        with mock.patch.dict(os.environ, {"RERANKER_MODEL": "reranker", "LLM_BASE_URL": "http://proxy"}):
+            with mock.patch.object(rag_engine, "_post_json", side_effect=failing):
+                retriever = RagRetriever(self.kb_root, use_dense=False)
+                for _ in range(6):
+                    self.assertTrue(retriever.retrieve("образцовый модуль", top_k=3))
+        self.assertEqual(len(calls), rag_engine.BREAKER_LIMIT)
+
+    def test_rerank_asks_for_all_documents_and_dedupes_query(self) -> None:
+        seen = {}
+
+        def capture(path, payload, timeout, attempts=3):
+            seen.update(payload)
+            return {"results": [{"index": i, "relevance_score": 1.0} for i in range(len(payload["documents"]))]}
+
+        with mock.patch.dict(os.environ, {"RERANKER_MODEL": "reranker", "LLM_BASE_URL": "http://proxy"}):
+            with mock.patch.object(rag_engine, "_post_json", side_effect=capture):
+                RagRetriever(self.kb_root, use_dense=False).retrieve("образцовый модуль\nобразцовый модуль\nустройство", top_k=3)
+        self.assertEqual(seen["top_n"], len(seen["documents"]))
+        self.assertEqual(seen["query"], "образцовый модуль\nустройство")
+
+    def test_index_embedding_respects_time_budget(self) -> None:
+        clock = iter([0.0, 0.0, 100.0, 200.0, 300.0])
+        with mock.patch.dict(os.environ, {"EMB_MODEL": "emb", "LLM_BASE_URL": "http://proxy"}):
+            with mock.patch.object(rag_engine, "_post_json", return_value={"data": [{"index": i, "embedding": [1.0]} for i in range(rag_engine.EMBED_BATCH_SIZE)]}):
+                with mock.patch.object(rag_engine.time, "monotonic", side_effect=lambda: next(clock)):
+                    with self.assertRaises(RuntimeError):
+                        rag_engine._embed_texts(["текст"] * (rag_engine.EMBED_BATCH_SIZE * 3), budget=90.0)
 
 class KnowledgeBaseDiscoveryTests(unittest.TestCase):
     def test_zip_is_extracted(self) -> None:
