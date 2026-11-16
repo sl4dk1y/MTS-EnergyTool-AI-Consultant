@@ -296,7 +296,7 @@ class ResilienceTests(unittest.TestCase):
     def test_prompt_version_switch(self):
         self.assertIn(
             consultant_engine.SYSTEM_PROMPT,
-            (consultant_engine.SYSTEM_PROMPT_V1, consultant_engine.SYSTEM_PROMPT_V2, consultant_engine.SYSTEM_PROMPT_V3),
+            (consultant_engine.SYSTEM_PROMPT_V1, consultant_engine.SYSTEM_PROMPT_V2, consultant_engine.SYSTEM_PROMPT_V3, consultant_engine.SYSTEM_PROMPT_V4),
         )
         self.assertIn("Только если в базе совсем нет сведений", consultant_engine.SYSTEM_PROMPT_V3)
         self.assertIn("Опирайся только на сведения", consultant_engine.SYSTEM_PROMPT_V1)
@@ -622,10 +622,10 @@ class KnowledgeBaseSearchTests(unittest.TestCase):
             engine = consultant_engine.build_default_engine()
         self.assertEqual(engine._top_k, consultant_engine.DEFAULT_TOP_K)
         self.assertEqual(engine.llm._max_tokens, consultant_engine.MIN_MAX_TOKENS)
-        with mock.patch.dict(os.environ, {**env, "ENGINE_TOP_K": "6", "MAX_TOKENS": "4096"}, clear=False), contextlib.redirect_stderr(io.StringIO()):
+        with mock.patch.dict(os.environ, {**env, "ENGINE_TOP_K": "6", "MAX_TOKENS": "8192"}, clear=False), contextlib.redirect_stderr(io.StringIO()):
             engine = consultant_engine.build_default_engine()
         self.assertEqual(engine._top_k, 6)
-        self.assertEqual(engine.llm._max_tokens, 4096)
+        self.assertEqual(engine.llm._max_tokens, 8192)
 
 if __name__ == "__main__":
     unittest.main()
