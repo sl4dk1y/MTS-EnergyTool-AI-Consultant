@@ -66,3 +66,19 @@ textarea:focus{border-color:var(--red);outline:3px solid rgba(227,6,19,.14)}
 @media(max-width:600px){.top-in{padding:10px 12px;gap:10px;flex-wrap:wrap}.brand{font-size:17px}.brand small{display:none}.mark{width:32px;height:32px;border-radius:9px}.actions{gap:6px}.btn{padding:8px 12px;font-size:13px}.wrap{padding:8px;gap:8px}.main{border-radius:16px;min-height:calc(100vh - 84px);min-height:calc(100dvh - 84px)}.hero{padding:18px 14px 2px}.hero h1{font-size:23px}.hero p{font-size:14px}#chat{padding:14px;gap:10px}.row{max-width:100%}.msg{font-size:15px;padding:11px 13px}.chips{padding:0 14px 10px}.chip{font-size:12px;padding:7px 11px}#debug{margin:0 14px 10px}.composer{padding:12px}.composer-in{gap:8px}textarea{font-size:16px;padding:11px 12px}.modal{padding:12px}.modal form{padding:20px 16px;max-height:calc(100vh - 24px);max-height:calc(100dvh - 24px);overflow-y:auto}.modal input{font-size:16px}.toast{max-width:calc(100vw - 32px);text-align:center;bottom:calc(16px + env(safe-area-inset-bottom,0px))}}
 @media(pointer:coarse){.btn,.chip{min-height:40px}}
 @media(prefers-reduced-motion:reduce){*{transition:none !important}}
+
+html,body,#root{height:100%;min-height:0}
+#root{height:100vh;height:100dvh;display:flex;flex-direction:column;overflow:hidden}
+.top{flex:0 0 auto}
+.wrap{flex:1 1 auto;min-height:0;grid-template-rows:minmax(0,1fr);align-items:stretch}
+.side{min-height:0;overflow-y:auto;overscroll-behavior-y:contain}
+.main{height:100%;min-height:0}
+.hero,.chips,#debug,.composer{flex:0 0 auto}
+#chat{flex:1 1 0;min-height:0;min-width:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch;touch-action:pan-y}
+.row{min-width:0}
+.row>div:last-child{min-width:0;max-width:calc(100% - 44px)}
+.msg{min-width:0;max-width:100%;overflow-wrap:anywhere;word-break:normal}
+textarea{min-width:0}
+#debug{overflow-wrap:anywhere}
+@media(max-width:900px){.main{min-height:0}}
+@media(max-width:600px){.main{min-height:0}}
