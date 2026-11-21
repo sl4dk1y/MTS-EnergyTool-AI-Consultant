@@ -1,10 +1,11 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { api, EXAMPLE_QUESTIONS } from './api.js';
 import Sidebar from './components/Sidebar.jsx';
 import LeadModal from './components/LeadModal.jsx';
 
 const SESSION_IDS_KEY = 'mts-session-ids';
 const GREETING = 'Здравствуйте! Я консультант МТС EnergyTool. Опишите задачу — вместе разберёмся, какие сведения нужны и что можно сделать дальше.';
+const CHAT_BOTTOM_THRESHOLD = 32;
 
 function readSessionIds() {
   try {
@@ -49,6 +50,8 @@ export default function App() {
   });
 
   const chatRef = useRef(null);
+  const stickToBottomRef = useRef(true);
+  const forceChatScrollRef = useRef(true);
   const inputRef = useRef(null);
   const toastTimer = useRef(null);
   const startedRef = useRef(false);
@@ -79,6 +82,8 @@ export default function App() {
   }, []);
 
   const startFresh = useCallback(async () => {
+    stickToBottomRef.current = true;
+    forceChatScrollRef.current = true;
     setSessionLoading(true);
     setSid('');
     setSessionError('');
@@ -107,8 +112,14 @@ export default function App() {
     startFresh();
   }, [loadHistory, startFresh]);
 
-  useEffect(() => {
-    if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
+  useLayoutEffect(() => {
+    const chat = chatRef.current;
+    if (!chat) return;
+    if (forceChatScrollRef.current || stickToBottomRef.current) {
+      chat.scrollTop = chat.scrollHeight;
+      stickToBottomRef.current = true;
+    }
+    forceChatScrollRef.current = false;
   }, [msgs, busy]);
 
   const openSession = useCallback(async (id) => {
@@ -116,6 +127,8 @@ export default function App() {
     setBusy(true);
     try {
       const session = await api(`/api/sessions/${encodeURIComponent(id)}`);
+      stickToBottomRef.current = true;
+      forceChatScrollRef.current = true;
       setSid(session.id);
       rememberSession(session.id);
       const history = Array.isArray(session.messages) ? session.messages : [];
@@ -246,7 +259,10 @@ export default function App() {
             <p>Опишите ситуацию своими словами. Консультант уточнит детали и, если вы захотите, поможет подготовить заявку менеджеру.</p>
             {sessionError ? <p className="error" role="alert">{sessionError}</p> : null}
           </div>
-          <div id="chat" aria-live="polite" ref={chatRef}>
+          <div id="chat" aria-live="polite" ref={chatRef} onScroll={(event) => {
+            const chat = event.currentTarget;
+            stickToBottomRef.current = chat.scrollHeight - chat.clientHeight - chat.scrollTop <= CHAT_BOTTOM_THRESHOLD;
+          }}>
             {msgs.map((message, index) => (
               <div className={`row ${message.role === 'user' ? 'user' : 'bot'}`} key={`${message.role}-${index}`}>
                 <div className="avatar">{message.role === 'user' ? 'Вы' : 'ET'}</div>
